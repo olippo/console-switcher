@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:name=".ConsoleSwitcherApp"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ConsoleSwitcher3">
+
+        <!-- Shizuku Provider -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false" />
+
+        <!-- ConsoleSwitcher Translucent Landscape Overlay HUD Activity (PRIMARY LAUNCH TARGET) -->
+        <activity
+            android:name=".OverlayActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:icon="@mipmap/ic_launcher"
+            android:theme="@style/Theme.ConsoleSwitcher.Overlay"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard"
+            android:windowSoftInputMode="stateAlwaysHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Main Dashboard & Settings Activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Console Switcher Settings"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <!-- Quick Settings Tile -->
+        <service
+            android:name=".service.ConsoleSwitcherTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher_foreground"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Broadcast Receiver for hardware key mappers & frontends -->
+        <receiver
+            android:name=".receiver.ConsoleSwitcherReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.example.consoleswitcher3.OPEN_SWITCHER" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

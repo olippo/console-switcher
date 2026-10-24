@@ -1,0 +1,67 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base Application Theme - Neutral Light Theme -->
+    <style name="Theme.ConsoleSwitcher3" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+
+        <!-- Neutral / Monochrome M3 Palette -->
+        <item name="colorPrimary">#212529</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#E9ECEF</item>
+        <item name="colorOnPrimaryContainer">#1A1D20</item>
+
+        <item name="colorSecondary">#495057</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="colorSecondaryContainer">#E9ECEF</item>
+        <item name="colorOnSecondaryContainer">#212529</item>
+
+        <item name="colorTertiary">#343A40</item>
+        <item name="colorOnTertiary">#FFFFFF</item>
+        <item name="colorTertiaryContainer">#DEE2E6</item>
+        <item name="colorOnTertiaryContainer">#1A1D20</item>
+
+        <item name="android:colorBackground">#F8F9FA</item>
+        <item name="colorOnBackground">#212529</item>
+        <item name="colorSurface">#FFFFFF</item>
+        <item name="colorOnSurface">#212529</item>
+        <item name="colorSurfaceVariant">#E9ECEF</item>
+        <item name="colorOnSurfaceVariant">#495057</item>
+        <item name="colorSurfaceContainer">#F1F3F5</item>
+        <item name="colorSurfaceContainerHigh">#E9ECEF</item>
+        <item name="colorSurfaceContainerHighest">#DEE2E6</item>
+        <item name="colorOutline">#CED4DA</item>
+        <item name="colorOutlineVariant">#E9ECEF</item>
+
+        <!-- Zero tint on surface overlays -->
+        <item name="elevationOverlayColor">@android:color/transparent</item>
+    </style>
+
+    <!-- Translucent Overlay Theme for Instant Landscape App Switcher -->
+    <style name="Theme.ConsoleSwitcher.Overlay" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+    <!-- Instant transition without sliding animation -->
+    <style name="ConsoleSwitcher.OverlayAnimation" parent="@android:style/Animation">
+        <item name="android:windowEnterAnimation">@null</item>
+        <item name="android:windowExitAnimation">@null</item>
+        <item name="android:activityOpenEnterAnimation">@null</item>
+        <item name="android:activityOpenExitAnimation">@null</item>
+        <item name="android:activityCloseEnterAnimation">@null</item>
+        <item name="android:activityCloseExitAnimation">@null</item>
+        <item name="android:taskOpenEnterAnimation">@null</item>
+        <item name="android:taskOpenExitAnimation">@null</item>
+        <item name="android:taskCloseEnterAnimation">@null</item>
+        <item name="android:taskCloseExitAnimation">@null</item>
+    </style>
+</resources>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Explicit no-op animation. A resource ID of 0 means "unspecified" to the
+     system (which then substitutes its own default modal animation), while
+     this empty animation means "play this: nothing". -->
+<alpha xmlns:android="http://schemas.android.com/apk/res/android"
+    android:fromAlpha="1.0"
+    android:toAlpha="1.0"
+    android:duration="1" />

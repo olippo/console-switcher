@@ -1,0 +1,39 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- In dark mode, clean neutral / slate dark palette (no purple tint) -->
+    <style name="Theme.ConsoleSwitcher3" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- Neutral Dark Palette -->
+        <item name="colorPrimary">#E9ECEF</item>
+        <item name="colorOnPrimary">#121417</item>
+        <item name="colorPrimaryContainer">#2B3035</item>
+        <item name="colorOnPrimaryContainer">#F8F9FA</item>
+
+        <item name="colorSecondary">#CED4DA</item>
+        <item name="colorOnSecondary">#1A1D20</item>
+        <item name="colorSecondaryContainer">#2B3035</item>
+        <item name="colorOnSecondaryContainer">#E9ECEF</item>
+
+        <item name="colorTertiary">#ADB5BD</item>
+        <item name="colorOnTertiary">#121417</item>
+        <item name="colorTertiaryContainer">#343A40</item>
+        <item name="colorOnTertiaryContainer">#F8F9FA</item>
+
+        <item name="android:colorBackground">#121417</item>
+        <item name="colorOnBackground">#E9ECEF</item>
+        <item name="colorSurface">#1A1D20</item>
+        <item name="colorOnSurface">#E9ECEF</item>
+        <item name="colorSurfaceVariant">#2B3035</item>
+        <item name="colorOnSurfaceVariant">#ADB5BD</item>
+        <item name="colorSurfaceContainer">#1A1D20</item>
+        <item name="colorSurfaceContainerHigh">#212529</item>
+        <item name="colorSurfaceContainerHighest">#2B3035</item>
+        <item name="colorOutline">#495057</item>
+        <item name="colorOutlineVariant">#343A40</item>
+
+        <!-- Disable purple surface tinting on dark cards/dialogs -->
+        <item name="elevationOverlayColor">@android:color/transparent</item>
+    </style>
+</resources>

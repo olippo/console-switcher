@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Console Switcher</string>
+    <string name="no_recent_items">No recent items</string>
+    <string name="shizuku_required">Shizuku permission required to view running tasks</string>
+</resources>

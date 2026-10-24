@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    
+    <!-- ConsoleSwitcher Dark Handheld Palette -->
+    <color name="deck_bg_dark">#FF0D111A</color>
+    <color name="deck_overlay_scrim">#EB090D14</color>
+    <color name="deck_card_bg">#FF151E2B</color>
+    <color name="deck_card_focused">#FF1C283B</color>
+    <color name="deck_current_task_card_bg">#FF1D1D1D</color>
+    <color name="deck_card_border">#334155</color>
+    <color name="deck_card_border_focused">#00E5FF</color>
+    <color name="deck_glow_cyan">#6600E5FF</color>
+    <color name="deck_accent_cyan">#00E5FF</color>
+    <color name="deck_accent_purple">#7C4DFF</color>
+    <color name="deck_accent_green">#00E676</color>
+    <color name="deck_accent_red">#FF3D71</color>
+    <color name="deck_accent_amber">#FFB300</color>
+    
+    <color name="deck_text_primary">#F1F5F9</color>
+    <color name="deck_text_secondary">#94A3B8</color>
+    <color name="deck_text_muted">#64748B</color>
+    
+    <color name="deck_button_a">#00E676</color>
+    <color name="deck_button_b">#FF3D71</color>
+    <color name="deck_button_x">#00E5FF</color>
+    <color name="deck_button_y">#FFD600</color>
+</resources>
