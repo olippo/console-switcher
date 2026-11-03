@@ -12,6 +12,10 @@ import com.example.consoleswitcher3.model.DeckTask
 class DeckTaskAdapter(
     private var tasks: List<DeckTask>,
     private val onTaskClick: (Int, DeckTask) -> Unit,
+    /** Card width in pixels matching screen aspect ratio. */
+    private var cardWidthPx: Int = -1,
+    /** Card height in pixels. */
+    private var cardHeightPx: Int = -1,
     /** Total gap between adjacent cards in px. Negative = keep layout XML padding. */
     private var cardGapPx: Int = -1,
     /** Scale applied to every non-selected card. Selected card is always 1.0f. */
@@ -84,6 +88,19 @@ class DeckTaskAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): TaskViewHolder {
         val view = LayoutInflater.from(parent.context)
             .inflate(R.layout.item_deck_task, parent, false)
+        if (cardWidthPx > 0 && cardHeightPx > 0) {
+            val cardContainer = view.findViewById<View>(R.id.cardContainer)
+            cardContainer?.layoutParams?.let { params ->
+                params.width = cardWidthPx
+                params.height = cardHeightPx
+                cardContainer.layoutParams = params
+            }
+            val labelRow = view.findViewById<View>(R.id.labelRow)
+            labelRow?.layoutParams?.let { params ->
+                params.width = cardWidthPx
+                labelRow.layoutParams = params
+            }
+        }
         if (cardGapPx >= 0) {
             val half = cardGapPx / 2
             view.setPadding(half, view.paddingTop, half, view.paddingBottom)

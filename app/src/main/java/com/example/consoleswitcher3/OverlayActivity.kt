@@ -195,6 +195,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         sideScale = com.example.consoleswitcher3.prefs.OverlayPrefs.getSideScale(this)
         taskAdapter = DeckTaskAdapter(
             tasks = tasks,
+            cardWidthPx = getCardWidthPx(),
+            cardHeightPx = getCardHeightPx(),
             cardGapPx = getCardGapPx(),
             sideScale = sideScale,
             onTaskClick = { clickedPosition, task ->
@@ -315,9 +317,21 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         return if (raw % 2 == 0) raw else raw + 1
     }
 
+    private fun getCardHeightPx(): Int {
+        val density = resources.displayMetrics.density
+        return (180f * density).toInt()
+    }
+
+    private fun getCardWidthPx(): Int {
+        val metrics = resources.displayMetrics
+        val screenW = maxOf(metrics.widthPixels, metrics.heightPixels).toFloat()
+        val screenH = minOf(metrics.widthPixels, metrics.heightPixels).toFloat()
+        val aspectRatio = if (screenH > 0f) (screenW / screenH).coerceIn(1.0f, 2.5f) else (16f / 9f)
+        return (getCardHeightPx() * aspectRatio).toInt()
+    }
+
     private fun getItemWidthPx(): Int {
-        val cardWidth = resources.getDimensionPixelSize(R.dimen.xmb_card_width)
-        return cardWidth + getCardGapPx()
+        return getCardWidthPx() + getCardGapPx()
     }
 
     /** Layout position of the child nearest the RecyclerView center, or null. */
