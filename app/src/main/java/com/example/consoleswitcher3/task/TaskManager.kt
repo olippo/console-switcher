@@ -73,23 +73,12 @@ object TaskManager {
 
         try {
             val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PackageManager.MATCH_ALL
-            } else {
-                0
-            }
-            val resolveInfos = pm.queryIntentActivities(homeIntent, flags)
-            for (info in resolveInfos) {
-                info.activityInfo?.packageName?.let { homePackages.add(it) }
-            }
-
+            // Resolve ONLY the currently active default launcher chosen by the user or system
             val defaultHome = pm.resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
-            defaultHome?.activityInfo?.packageName?.let { homePackages.add(it) }
-
-            val secHomeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_SECONDARY_HOME)
-            val secResolveInfos = pm.queryIntentActivities(secHomeIntent, flags)
-            for (info in secResolveInfos) {
-                info.activityInfo?.packageName?.let { homePackages.add(it) }
+            val defaultPkg = defaultHome?.activityInfo?.packageName
+            // "android" is returned if the user hasn't chosen a default launcher yet (resolver dialog)
+            if (!defaultPkg.isNullOrEmpty() && defaultPkg != "android") {
+                homePackages.add(defaultPkg)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "Error querying home packages", e)
