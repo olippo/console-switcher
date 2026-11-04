@@ -64,6 +64,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private var animatingVictimView: View? = null
     private var removalShiftX: Float = 0f
     private var removalShiftStartIndex: Int = -1
+    private var removalLeftShiftX: Float = 0f
+    private var removalLeftShiftEndIndex: Int = -1
+    private var pendingTargetIndexAfterRemove: Int = -1
     private var slideAnimator: ValueAnimator? = null
     private var pendingSlideRunnable: Runnable? = null
 
@@ -184,6 +187,37 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 super.calculateExtraLayoutSpace(state, extraLayoutSpace)
                 extraLayoutSpace[0] += extraLayoutPx
                 extraLayoutSpace[1] += extraLayoutPx
+            }
+
+            override fun onLayoutCompleted(state: RecyclerView.State?) {
+                super.onLayoutCompleted(state)
+                // When an item is removed, RecyclerView may anchor to the first
+                // visible child and clamp excess scroll at the strip boundaries,
+                // shifting surviving cards away from exact center. Compensate
+                // synchronously inside the layout pass so the target card is
+                // locked to rvTasks.width / 2f before any frame is drawn.
+                val targetIdx = pendingTargetIndexAfterRemove
+                if (targetIdx >= 0) {
+                    pendingTargetIndexAfterRemove = -1
+                    val targetView = findViewByPosition(targetIdx)
+                    if (targetView != null && targetView.width > 0) {
+                        val currentCenter = (targetView.left + targetView.right) / 2f
+                        val centerX = binding.rvTasks.width / 2f
+                        val dx = Math.round(centerX - currentCenter)
+                        if (dx != 0) {
+                            binding.rvTasks.offsetChildrenHorizontal(dx)
+                        }
+                    }
+                }
+                if (removalShiftStartIndex >= 0 || removalShiftX != 0f ||
+                    removalLeftShiftEndIndex >= 0 || removalLeftShiftX != 0f
+                ) {
+                    removalShiftStartIndex = -1
+                    removalShiftX = 0f
+                    removalLeftShiftEndIndex = -1
+                    removalLeftShiftX = 0f
+                }
+                updateXmbTransforms()
             }
         }
         binding.rvTasks.layoutManager = layoutManager
@@ -396,10 +430,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         if (centerX <= 0f) return
 
         val pos = layoutManager.getPosition(child)
-        val shift = if (removalShiftStartIndex >= 0 && pos >= removalShiftStartIndex && pos != RecyclerView.NO_POSITION) {
-            removalShiftX
-        } else {
-            0f
+        val shift = when {
+            pos == RecyclerView.NO_POSITION -> 0f
+            removalShiftStartIndex >= 0 && pos >= removalShiftStartIndex -> removalShiftX
+            removalLeftShiftEndIndex >= 0 && pos <= removalLeftShiftEndIndex -> removalLeftShiftX
+            else -> 0f
         }
 
         val childCenter = (child.left + child.right) / 2f
@@ -773,6 +808,23 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 victimPos - 1
             }
 
+            // Lock the surviving target card to exact center inside the layout
+            // pass triggered by notifyItemRemoved.
+            pendingTargetIndexAfterRemove = nextPos
+
+            // Reset victim view and animation shifts before adapter removal so if
+            // RecyclerView recycles or detaches it during layout, its view state is clean.
+            removalShiftStartIndex = -1
+            removalShiftX = 0f
+            removalLeftShiftEndIndex = -1
+            removalLeftShiftX = 0f
+            animatingVictimView = null
+            victimView.translationY = 0f
+            victimView.alpha = 1f
+            victimView.scaleX = 1f
+            victimView.scaleY = 1f
+            victimView.translationZ = 0f
+
             if (victimPos in tasks.indices && victimPos < taskAdapter.itemCount) {
                 tasks.removeAt(victimPos)
                 taskAdapter.removeAt(victimPos)
@@ -780,32 +832,17 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             }
 
             var cleanedUp = false
-            fun cleanup() {
+            fun finishKill() {
                 if (cleanedUp) return
                 cleanedUp = true
-                removalShiftStartIndex = -1
-                removalShiftX = 0f
-                animatingVictimView = null
-                victimView.translationY = 0f
-                victimView.alpha = 1f
-                victimView.scaleX = 1f
-                victimView.scaleY = 1f
-                victimView.translationZ = 0f
-                if (isFinishing || isDestroyed) {
-                    killInFlight = false
-                    return
+                if (!isFinishing && !isDestroyed) {
+                    updateXmbTransforms()
+                    triggerHaptic()
                 }
-                updateXmbTransforms()
-                triggerHaptic()
                 killInFlight = false
             }
-
-            binding.rvTasks.doOnNextLayout {
-                cleanup()
-            }
-            binding.rvTasks.post {
-                cleanup()
-            }
+            binding.rvTasks.doOnNextLayout { finishKill() }
+            binding.rvTasks.post { finishKill() }
         }
 
         // Safety watchdog: ensure kill state is never locked permanently if animation callbacks drop
@@ -822,18 +859,42 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         binding.rvTasks.postDelayed(watchdog, watchdogTimeoutMs)
 
         // Start the slide animation (in parallel with the fly-up or delayed by slideDelayMs).
+        val centerX = binding.rvTasks.width / 2f
         if (hasRightNeighbor) {
+            // Slide right neighbors to exact center (not just -slotWidth, which would
+            // land off-center if kill was pressed while the strip was mid-scroll),
+            // and simultaneously settle left neighbors if the strip was slightly off-center.
+            val rightView = layoutManager.findViewByPosition(victimPos + 1)
+            val rightCenter = if (rightView != null && rightView.width > 0 && rightView.right > rightView.left) {
+                (rightView.left + rightView.right) / 2f
+            } else {
+                centerX + slotWidth
+            }
+            val targetRightShift = centerX - rightCenter
+
+            val leftView = if (victimPos > 0) layoutManager.findViewByPosition(victimPos - 1) else null
+            val targetLeftShift = if (leftView != null && leftView.width > 0 && leftView.right > leftView.left) {
+                val leftCenter = (leftView.left + leftView.right) / 2f
+                (centerX - slotWidth) - leftCenter
+            } else {
+                0f
+            }
+
             removalShiftStartIndex = victimPos + 1
             removalShiftX = 0f
+            removalLeftShiftEndIndex = victimPos - 1
+            removalLeftShiftX = 0f
 
             pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
             slideAnimator?.cancel()
-            val animator = ValueAnimator.ofFloat(0f, -slotWidth).apply {
+            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = slideDuration
                 interpolator = DecelerateInterpolator(1.5f)
                 addUpdateListener { anim ->
                     if (isFinishing || isDestroyed) return@addUpdateListener
-                    removalShiftX = anim.animatedValue as Float
+                    val f = anim.animatedValue as Float
+                    removalShiftX = targetRightShift * f
+                    removalLeftShiftX = targetLeftShift * f
                     updateXmbTransforms()
                 }
                 addListener(object : AnimatorListenerAdapter() {
@@ -847,6 +908,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         slideAnimator = null
                         removalShiftStartIndex = -1
                         removalShiftX = 0f
+                        removalLeftShiftEndIndex = -1
+                        removalLeftShiftX = 0f
                         animatingVictimView = null
                         victimView.translationY = 0f
                         victimView.alpha = 1f
@@ -873,69 +936,64 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 runnable.run()
             }
         } else if (tasks.size > 1) {
-            // Victim was the last card: scroll the left neighbor into center in parallel.
+            // Victim was the last card: slide left neighbors right so nextPos lands at exact center.
             val nextPos = victimPos - 1
             val nextView = layoutManager.findViewByPosition(nextPos)
             val nextCenter = if (nextView != null && nextView.width > 0 && nextView.right > nextView.left) {
                 (nextView.left + nextView.right) / 2f
             } else {
-                (binding.rvTasks.width / 2f) - slotWidth
+                centerX - slotWidth
             }
-            val centerX = binding.rvTasks.width / 2f
-            val totalScroll = Math.round(nextCenter - centerX)
+            val targetLeftShift = centerX - nextCenter
 
-            if (totalScroll != 0) {
-                var lastScrolled = 0
-                pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
-                slideAnimator?.cancel()
-                val animator = ValueAnimator.ofInt(0, totalScroll).apply {
-                    duration = slideDuration
-                    interpolator = DecelerateInterpolator(1.5f)
-                    addUpdateListener { anim ->
-                        if (isFinishing || isDestroyed) return@addUpdateListener
-                        val current = anim.animatedValue as Int
-                        val step = current - lastScrolled
-                        lastScrolled = current
-                        if (step != 0) {
-                            binding.rvTasks.scrollBy(step, 0)
-                        }
+            removalLeftShiftEndIndex = nextPos
+            removalLeftShiftX = 0f
+
+            pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
+            slideAnimator?.cancel()
+            val animator = ValueAnimator.ofFloat(0f, targetLeftShift).apply {
+                duration = slideDuration
+                interpolator = DecelerateInterpolator(1.5f)
+                addUpdateListener { anim ->
+                    if (isFinishing || isDestroyed) return@addUpdateListener
+                    removalLeftShiftX = anim.animatedValue as Float
+                    updateXmbTransforms()
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        slideAnimator = null
+                        slideDone = true
+                        checkAndFinalize()
                     }
-                    addListener(object : AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: Animator) {
-                            slideAnimator = null
-                            slideDone = true
-                            checkAndFinalize()
-                        }
 
-                        override fun onAnimationCancel(animation: Animator) {
-                            slideAnimator = null
-                            animatingVictimView = null
-                            victimView.translationY = 0f
-                            victimView.alpha = 1f
-                            victimView.scaleX = 1f
-                            victimView.scaleY = 1f
-                            victimView.translationZ = 0f
-                            killInFlight = false
-                        }
-                    })
-                }
-                slideAnimator = animator
-
-                val runnable = Runnable {
-                    pendingSlideRunnable = null
-                    if (!isFinishing && !isDestroyed) {
-                        animator.start()
+                    override fun onAnimationCancel(animation: Animator) {
+                        slideAnimator = null
+                        removalLeftShiftEndIndex = -1
+                        removalLeftShiftX = 0f
+                        animatingVictimView = null
+                        victimView.translationY = 0f
+                        victimView.alpha = 1f
+                        victimView.scaleX = 1f
+                        victimView.scaleY = 1f
+                        victimView.translationZ = 0f
+                        killInFlight = false
                     }
-                }
-                pendingSlideRunnable = runnable
+                })
+            }
+            slideAnimator = animator
 
-                if (slideDelayMs > 0L) {
-                    binding.rvTasks.postDelayed(runnable, slideDelayMs)
-                } else {
-                    runnable.run()
+            val runnable = Runnable {
+                pendingSlideRunnable = null
+                if (!isFinishing && !isDestroyed) {
+                    animator.start()
                 }
+            }
+            pendingSlideRunnable = runnable
+
+            if (slideDelayMs > 0L) {
+                binding.rvTasks.postDelayed(runnable, slideDelayMs)
             } else {
-                slideDone = true
+                runnable.run()
             }
         } else {
             // Single card (tasks.size <= 1), no slide needed
