@@ -3,11 +3,15 @@ package com.example.consoleswitcher3
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -15,6 +19,7 @@ import android.util.DisplayMetrics
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
@@ -23,7 +28,9 @@ import android.provider.Settings
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnNextLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -37,6 +44,7 @@ import com.example.consoleswitcher3.task.TaskManager
 import com.example.consoleswitcher3.ui.DeckTaskAdapter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener {
 
@@ -72,12 +80,49 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private lateinit var audioManager: AudioManager
     private var currentBrightness: Int = 128
+    private val indicatorHandler = Handler(Looper.getMainLooper())
+    private var lastReportedVolume: Int = -1
+
+    private val hideBrightnessRunnable = Runnable {
+        binding.layoutBrightness.animate()
+            .alpha(0f)
+            .setDuration(250)
+            .withEndAction {
+                binding.layoutBrightness.visibility = View.GONE
+                binding.layoutBrightness.alpha = 1f
+            }
+            .start()
+    }
+
+    private val hideVolumeRunnable = Runnable {
+        binding.layoutVolume.animate()
+            .alpha(0f)
+            .setDuration(250)
+            .withEndAction {
+                binding.layoutVolume.visibility = View.GONE
+                binding.layoutVolume.alpha = 1f
+            }
+            .start()
+    }
+
+    private val volumeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val currentVol = getVolumePercent()
+            if (lastReportedVolume >= 0 && currentVol != lastReportedVolume) {
+                lastReportedVolume = currentVol
+                showVolumeIndicator()
+            } else {
+                lastReportedVolume = currentVol
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "OverlayActivity"
         private const val BRIGHTNESS_STEP = 13 // ~5% of 255
         private const val MIN_BRIGHTNESS = 10
         private const val MAX_BRIGHTNESS = 255
+        private const val INDICATOR_TIMEOUT_MS = 2000L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,6 +143,29 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         binding = ActivityOverlayBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Adjust indicator margins based on system insets (cutouts/navigation bars)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.overlayRoot) { _, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val baseMarginBottom = (18 * resources.displayMetrics.density).toInt()
+            val baseMarginSide = (28 * resources.displayMetrics.density).toInt()
+
+            (binding.layoutBrightness.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
+                it.marginStart = baseMarginSide + bars.left
+                it.bottomMargin = baseMarginBottom + bars.bottom
+                binding.layoutBrightness.layoutParams = it
+            }
+
+            (binding.layoutVolume.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
+                it.marginStart = baseMarginSide + bars.left
+                it.bottomMargin = baseMarginBottom + bars.bottom
+                binding.layoutVolume.layoutParams = it
+            }
+
+            insets
+        }
 
         // Card strip height above the bottom edge comes from Settings.
         val bottomGapPx = (com.example.consoleswitcher3.prefs.OverlayPrefs.getBottomGapDp(this) *
@@ -130,6 +198,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         volumeControlStream = AudioManager.STREAM_MUSIC
         initBrightness()
+        lastReportedVolume = getVolumePercent()
         gamepadHelper = GamepadInputHelper(this)
 
         setupRecyclerView()
@@ -1038,10 +1107,32 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         dismissSwitcher()
     }
 
+    override fun onStart() {
+        super.onStart()
+        try {
+            val filter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(volumeReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(volumeReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register volume receiver: ${e.message}")
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try {
+            unregisterReceiver(volumeReceiver)
+        } catch (ignored: Throwable) {}
+    }
+
     override fun onResume() {
         super.onResume()
         killInFlight = false
         initBrightness()
+        lastReportedVolume = getVolumePercent()
     }
 
     override fun onPause() {
@@ -1054,6 +1145,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         super.onDestroy()
         killInFlight = false
         gamepadHelper.reset()
+        indicatorHandler.removeCallbacksAndMessages(null)
+        binding.layoutBrightness.animate().cancel()
+        binding.layoutVolume.animate().cancel()
         pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
         pendingSlideRunnable = null
         slideAnimator?.cancel()
@@ -1071,13 +1165,54 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
     }
 
+    private fun showBrightnessIndicator() {
+        val percent = ((currentBrightness / 255.0f) * 100f).roundToInt().coerceIn(0, 100)
+        binding.tvBrightness.text = "$percent%"
+
+        // Dismiss volume if it's currently showing
+        indicatorHandler.removeCallbacks(hideVolumeRunnable)
+        binding.layoutVolume.animate().cancel()
+        binding.layoutVolume.visibility = View.GONE
+
+        indicatorHandler.removeCallbacks(hideBrightnessRunnable)
+        binding.layoutBrightness.animate().cancel()
+        binding.layoutBrightness.alpha = 1f
+        binding.layoutBrightness.visibility = View.VISIBLE
+        indicatorHandler.postDelayed(hideBrightnessRunnable, INDICATOR_TIMEOUT_MS)
+    }
+
+    private fun getVolumePercent(): Int {
+        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (maxVol <= 0) return 0
+        val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        return ((currentVol.toFloat() / maxVol.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
+    }
+
+    private fun showVolumeIndicator() {
+        val percent = getVolumePercent()
+        lastReportedVolume = percent
+        binding.tvVolume.text = "$percent%"
+
+        // Dismiss brightness if it's currently showing
+        indicatorHandler.removeCallbacks(hideBrightnessRunnable)
+        binding.layoutBrightness.animate().cancel()
+        binding.layoutBrightness.visibility = View.GONE
+
+        indicatorHandler.removeCallbacks(hideVolumeRunnable)
+        binding.layoutVolume.animate().cancel()
+        binding.layoutVolume.alpha = 1f
+        binding.layoutVolume.visibility = View.VISIBLE
+        indicatorHandler.postDelayed(hideVolumeRunnable, INDICATOR_TIMEOUT_MS)
+    }
+
     private fun adjustVolume(direction: Int) {
         try {
             audioManager.adjustStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 direction,
-                AudioManager.FLAG_SHOW_UI
+                0
             )
+            showVolumeIndicator()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to adjust volume", e)
         }
@@ -1093,6 +1228,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         // 2. Persist to system setting
         persistSystemBrightness(currentBrightness)
+
+        // 3. Update indicator
+        showBrightnessIndicator()
     }
 
     private fun persistSystemBrightness(brightness: Int) {
@@ -1137,6 +1275,24 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             return true
         }
         if (gamepadHelper.handleKeyEvent(event)) {
+            return true
+        }
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                adjustVolume(AudioManager.ADJUST_RAISE)
+            }
+            return true
+        }
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                adjustVolume(AudioManager.ADJUST_LOWER)
+            }
+            return true
+        }
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                adjustVolume(AudioManager.ADJUST_TOGGLE_MUTE)
+            }
             return true
         }
         return super.dispatchKeyEvent(event)

@@ -116,4 +116,76 @@
             android:textSize="16sp" />
     </LinearLayout>
 
+    <!-- Brightness Indicator (Bottom Left) -->
+    <LinearLayout
+        android:id="@+id/layoutBrightness"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="28dp"
+        android:layout_marginBottom="18dp"
+        android:clickable="false"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        tools:visibility="visible"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <ImageView
+            android:id="@+id/ivBrightnessIcon"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:contentDescription="Brightness"
+            android:src="@drawable/ic_light_mode_rounded"
+            app:tint="@color/deck_text_primary" />
+
+        <TextView
+            android:id="@+id/tvBrightness"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:fontFamily="sans-serif-medium"
+            android:textColor="@color/deck_text_primary"
+            android:textSize="14sp"
+            tools:text="100%" />
+    </LinearLayout>
+
+    <!-- Volume Indicator (Same position as Brightness: Bottom Left) -->
+    <LinearLayout
+        android:id="@+id/layoutVolume"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="28dp"
+        android:layout_marginBottom="18dp"
+        android:clickable="false"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        tools:visibility="visible"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <ImageView
+            android:id="@+id/ivVolumeIcon"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:contentDescription="Volume"
+            android:src="@drawable/ic_volume_up_rounded"
+            app:tint="@color/deck_text_primary" />
+
+        <TextView
+            android:id="@+id/tvVolume"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:fontFamily="sans-serif-medium"
+            android:textColor="@color/deck_text_primary"
+            android:textSize="14sp"
+            tools:text="100%" />
+    </LinearLayout>
+
 </androidx.constraintlayout.widget.ConstraintLayout>
