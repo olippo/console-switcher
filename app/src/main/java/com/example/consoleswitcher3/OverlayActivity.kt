@@ -659,6 +659,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             ?.takeIf { it in 0 until taskAdapter.itemCount }
             ?: (pendingTarget ?: taskAdapter.selectedPosition)
                 .takeIf { it in 0 until taskAdapter.itemCount }
+            ?: taskAdapter.selectedPosition.coerceIn(0, (taskAdapter.itemCount - 1).coerceAtLeast(0))
+                .takeIf { taskAdapter.itemCount > 0 }
             ?: return
         val task = taskAdapter.getTaskAt(victimPos) ?: return
         android.util.Log.d(TAG, "kill press: victim=$victimPos selected=${taskAdapter.selectedPosition} pending=$pendingTarget count=${taskAdapter.itemCount}")
@@ -736,11 +738,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         var flyDone = false
         var slideDone = false
         var finalized = false
+        var watchdogRunnable: Runnable? = null
 
         fun checkAndFinalize() {
             if (finalized) return
             if (!flyDone || !slideDone) return
             finalized = true
+            watchdogRunnable?.let { binding.rvTasks.removeCallbacks(it) }
 
             if (isFinishing || isDestroyed) {
                 killInFlight = false
@@ -803,6 +807,19 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 cleanup()
             }
         }
+
+        // Safety watchdog: ensure kill state is never locked permanently if animation callbacks drop
+        val watchdogTimeoutMs = (flyDuration + slideDuration + slideDelayMs + 300L).coerceAtLeast(600L)
+        val watchdog = Runnable {
+            if (!finalized && !isFinishing && !isDestroyed) {
+                android.util.Log.w(TAG, "kill watchdog triggered: forcing checkAndFinalize")
+                flyDone = true
+                slideDone = true
+                checkAndFinalize()
+            }
+        }
+        watchdogRunnable = watchdog
+        binding.rvTasks.postDelayed(watchdog, watchdogTimeoutMs)
 
         // Start the slide animation (in parallel with the fly-up or delayed by slideDelayMs).
         if (hasRightNeighbor) {
@@ -940,6 +957,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun dismissSwitcher() {
+        killInFlight = false
         pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
         pendingSlideRunnable = null
         slideAnimator?.cancel()
@@ -964,16 +982,19 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onResume() {
         super.onResume()
+        killInFlight = false
         initBrightness()
     }
 
     override fun onPause() {
         super.onPause()
+        killInFlight = false
         gamepadHelper.reset()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        killInFlight = false
         gamepadHelper.reset()
         pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
         pendingSlideRunnable = null
