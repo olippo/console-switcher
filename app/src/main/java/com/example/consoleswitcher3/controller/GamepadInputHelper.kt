@@ -10,6 +10,8 @@ class GamepadInputHelper(private val listener: GamepadListener) {
     interface GamepadListener {
         fun onNavLeft()
         fun onNavRight()
+        fun onNavUp()
+        fun onNavDown()
         fun onNavStart()      // Keyboard PageUp/Home or Right Stick Left (move to start of list)
         fun onNavEnd()        // Keyboard PageDown/End or Right Stick Right (move to end of list)
         fun onButtonSelect()  // A / Enter
@@ -32,6 +34,7 @@ class GamepadInputHelper(private val listener: GamepadListener) {
     private var stickDirection = NavDirection.NONE
     private var currentActiveDirection = NavDirection.NONE
 
+    private var stickYInDeadzone = true
     private var rightStickInDeadzone = true
     private var l2TriggerActive = false
     private var r2TriggerActive = false
@@ -132,6 +135,7 @@ class GamepadInputHelper(private val listener: GamepadListener) {
         stickDirection = NavDirection.NONE
         currentActiveDirection = NavDirection.NONE
         activeContinuousAction = ContinuousAction.NONE
+        stickYInDeadzone = true
         rightStickInDeadzone = true
         l2TriggerActive = false
         r2TriggerActive = false
@@ -171,11 +175,16 @@ class GamepadInputHelper(private val listener: GamepadListener) {
                 }
                 true
             }
-            // Swallow UP/DOWN: the overlay has no vertical navigation, and letting
-            // these reach the framework would move view-focus onto a card, painting
-            // the grey selectableItemBackground focused veil over it.
-            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (isDown && event.repeatCount == 0) {
+                    listener.onNavUp()
+                }
+                true
+            }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (isDown && event.repeatCount == 0) {
+                    listener.onNavDown()
+                }
                 true
             }
             KeyEvent.KEYCODE_PAGE_UP,
@@ -290,6 +299,23 @@ class GamepadInputHelper(private val listener: GamepadListener) {
         if (newStickDirection != stickDirection) {
             stickDirection = newStickDirection
             updateActiveDirection()
+        }
+
+        // 1b. Vertical stick / D-pad Hat (switch between App Switcher and Control Center)
+        val y = event.getAxisValue(MotionEvent.AXIS_Y)
+        val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        val navY = if (Math.abs(y) > Math.abs(hatY)) y else hatY
+
+        if (Math.abs(navY) < STICK_DEADZONE) {
+            stickYInDeadzone = true
+        } else if (stickYInDeadzone) {
+            if (navY < -STICK_DEADZONE) {
+                stickYInDeadzone = false
+                listener.onNavUp()
+            } else if (navY > STICK_DEADZONE) {
+                stickYInDeadzone = false
+                listener.onNavDown()
+            }
         }
 
         // 2. Right stick (move to start or end of the list)

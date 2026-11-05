@@ -3,15 +3,22 @@ package com.example.consoleswitcher3
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.app.NotificationManager
+import android.app.UiModeManager
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -38,20 +45,34 @@ import androidx.recyclerview.widget.LinearSmoothScroller
 import androidx.recyclerview.widget.RecyclerView
 import com.example.consoleswitcher3.controller.GamepadInputHelper
 import com.example.consoleswitcher3.databinding.ActivityOverlayBinding
+import com.example.consoleswitcher3.model.ControlCard
 import com.example.consoleswitcher3.model.DeckTask
 import com.example.consoleswitcher3.shizuku.ShizukuManager
 import com.example.consoleswitcher3.task.TaskManager
+import com.example.consoleswitcher3.ui.DeckControlAdapter
 import com.example.consoleswitcher3.ui.DeckTaskAdapter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener {
+
+    private enum class OverlayMode {
+        APP_SWITCHER,
+        CONTROL_CENTER
+    }
 
     private lateinit var binding: ActivityOverlayBinding
     private lateinit var gamepadHelper: GamepadInputHelper
     private lateinit var taskAdapter: DeckTaskAdapter
     private lateinit var layoutManager: LinearLayoutManager
+    private lateinit var controlAdapter: DeckControlAdapter
+    private lateinit var controlLayoutManager: LinearLayoutManager
+
+    private var currentMode: OverlayMode = OverlayMode.APP_SWITCHER
+    private var isTransitioningMode: Boolean = false
 
     /** Target of the in-flight programmatic scroll, if any. While set,
      *  navigation chains off it (not the last committed position) so rapid
@@ -65,7 +86,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
      *  synchronously-dispatched idle can't commit transient state mid-fix. */
     private var suppressIdleCommit = false
 
+    private var controlPendingTarget: Int? = null
+    private var controlProgrammaticScroll = false
+
     private var tasks = mutableListOf<DeckTask>()
+    private var controlCards = mutableListOf<ControlCard>()
     private var vibrator: Vibrator? = null
     private var sideScale = com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_SIDE_SCALE
 
@@ -77,6 +102,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private var pendingTargetIndexAfterRemove: Int = -1
     private var slideAnimator: ValueAnimator? = null
     private var pendingSlideRunnable: Runnable? = null
+    private var modeTransitionAnimator: ValueAnimator? = null
 
     private lateinit var audioManager: AudioManager
     private var currentBrightness: Int = 128
@@ -123,6 +149,52 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         private const val MIN_BRIGHTNESS = 10
         private const val MAX_BRIGHTNESS = 255
         private const val INDICATOR_TIMEOUT_MS = 2000L
+        private const val PENDING_TOGGLE_TIMEOUT_MS = 4000L
+    }
+
+    private data class PendingToggle(
+        val targetState: Boolean,
+        val timestamp: Long
+    )
+    private val pendingToggleStates = mutableMapOf<String, PendingToggle>()
+
+    private val controlCenterReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                WifiManager.WIFI_STATE_CHANGED_ACTION -> {
+                    val state = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE, WifiManager.WIFI_STATE_UNKNOWN)
+                    val pending = pendingToggleStates["wifi"]
+                    if (pending != null) {
+                        if (pending.targetState && state == WifiManager.WIFI_STATE_ENABLED) {
+                            pendingToggleStates.remove("wifi")
+                        } else if (!pending.targetState && state == WifiManager.WIFI_STATE_DISABLED) {
+                            pendingToggleStates.remove("wifi")
+                        }
+                    }
+                    refreshControlCards()
+                }
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    val pending = pendingToggleStates["bluetooth"]
+                    if (pending != null) {
+                        if (pending.targetState && state == BluetoothAdapter.STATE_ON) {
+                            pendingToggleStates.remove("bluetooth")
+                        } else if (!pending.targetState && state == BluetoothAdapter.STATE_OFF) {
+                            pendingToggleStates.remove("bluetooth")
+                        }
+                    }
+                    refreshControlCards()
+                }
+                NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED -> {
+                    pendingToggleStates.remove("dnd")
+                    refreshControlCards()
+                }
+                PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> {
+                    pendingToggleStates.remove("battery_saver")
+                    refreshControlCards()
+                }
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -174,6 +246,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             it.bottomMargin = bottomGapPx
             binding.rvTasks.layoutParams = it
         }
+        (binding.rvControlCenter.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
+            it.bottomMargin = bottomGapPx
+            binding.rvControlCenter.layoutParams = it
+        }
         (binding.emptyLayout.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
             it.bottomMargin = bottomGapPx + (10 * resources.displayMetrics.density).toInt()
             binding.emptyLayout.layoutParams = it
@@ -202,7 +278,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         gamepadHelper = GamepadInputHelper(this)
 
         setupRecyclerView()
+        setupControlRecyclerView()
         setupListeners()
+        loadControlCards()
         loadTasks()
     }
 
@@ -437,6 +515,19 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         return getCardWidthPx() + getCardGapPx()
     }
 
+    private fun getControlCardHeightPx(): Int {
+        return getCardHeightPx()
+    }
+
+    private fun getControlCardWidthPx(): Int {
+        // Control Center cards are square
+        return getControlCardHeightPx()
+    }
+
+    private fun getControlItemWidthPx(): Int {
+        return getControlCardWidthPx() + getCardGapPx()
+    }
+
     /** Layout position of the child nearest the RecyclerView center, or null. */
     private fun findCenterPosition(): Int? {
         if (binding.rvTasks.width <= 0 || taskAdapter.itemCount == 0) return null
@@ -565,10 +656,968 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             holder?.setCenterFocused(isCenter)
     }
 
+    private fun setupControlRecyclerView() {
+        val extraLayoutPx = resources.displayMetrics.widthPixels
+        controlLayoutManager = object : LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false) {
+            override fun calculateExtraLayoutSpace(state: RecyclerView.State, extraLayoutSpace: IntArray) {
+                super.calculateExtraLayoutSpace(state, extraLayoutSpace)
+                extraLayoutSpace[0] += extraLayoutPx
+                extraLayoutSpace[1] += extraLayoutPx
+            }
+
+            override fun onLayoutCompleted(state: RecyclerView.State?) {
+                super.onLayoutCompleted(state)
+                updateControlXmbTransforms()
+            }
+        }
+        binding.rvControlCenter.layoutManager = controlLayoutManager
+        binding.rvControlCenter.itemAnimator = null
+        binding.rvControlCenter.overScrollMode = View.OVER_SCROLL_NEVER
+
+        controlAdapter = DeckControlAdapter(
+            cards = controlCards,
+            cardWidthPx = getControlCardWidthPx(),
+            cardHeightPx = getControlCardHeightPx(),
+            cardGapPx = getCardGapPx(),
+            sideScale = sideScale,
+            onCardClick = { clickedPosition, _ ->
+                if (!isTransitioningMode) {
+                    val current = controlPendingTarget ?: controlAdapter.selectedPosition
+                    if (clickedPosition == current) {
+                        toggleControlCardAt(clickedPosition)
+                    } else {
+                        smoothScrollControlToCenter(clickedPosition)
+                    }
+                }
+            }
+        )
+        binding.rvControlCenter.adapter = controlAdapter
+
+        updateControlCenterPadding()
+
+        binding.rvControlCenter.addOnChildAttachStateChangeListener(
+            object : RecyclerView.OnChildAttachStateChangeListener {
+                override fun onChildViewAttachedToWindow(view: View) {
+                    if (view.width > 0 && view.right > view.left) {
+                        applyControlXmbTransform(view)
+                    } else {
+                        view.post {
+                            if (view.parent != null) applyControlXmbTransform(view)
+                        }
+                    }
+                }
+
+                override fun onChildViewDetachedFromWindow(view: View) {}
+            }
+        )
+
+        binding.rvControlCenter.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                updateControlXmbTransforms()
+            }
+
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                    controlProgrammaticScroll = false
+                    controlPendingTarget = null
+                    return
+                }
+                if (newState != RecyclerView.SCROLL_STATE_IDLE) return
+                if (controlProgrammaticScroll) {
+                    controlProgrammaticScroll = false
+                    val target = controlPendingTarget?.takeIf { it in 0 until controlAdapter.itemCount }
+                    controlPendingTarget = null
+                    val landed = target
+                        ?: findControlCenterPosition()?.takeIf { it in 0 until controlAdapter.itemCount }
+                    if (landed != null && landed != RecyclerView.NO_POSITION) {
+                        if (landed != controlAdapter.selectedPosition) {
+                            controlAdapter.selectedPosition = landed
+                            if (landed != target) triggerHaptic()
+                        }
+                    }
+                    updateControlXmbTransforms()
+                } else {
+                    val nearest = findControlCenterPosition()
+                    if (nearest != null && nearest != RecyclerView.NO_POSITION) {
+                        val child = controlLayoutManager.findViewByPosition(nearest)
+                        val childCenter = if (child != null) (child.left + child.right) / 2f else 0f
+                        val centerX = binding.rvControlCenter.width / 2f
+                        val offCenter = if (child != null) {
+                            kotlin.math.abs(centerX - childCenter)
+                        } else Float.MAX_VALUE
+                        val canScrollMore = if (childCenter > centerX) {
+                            recyclerView.canScrollHorizontally(1)
+                        } else {
+                            recyclerView.canScrollHorizontally(-1)
+                        }
+                        if (offCenter > 2f && canScrollMore) {
+                            smoothScrollControlToCenter(nearest)
+                        } else if (nearest != controlAdapter.selectedPosition) {
+                            controlAdapter.selectedPosition = nearest
+                            triggerHaptic()
+                            updateControlXmbTransforms()
+                        } else {
+                            updateControlXmbTransforms()
+                        }
+                    } else {
+                        updateControlXmbTransforms()
+                    }
+                }
+            }
+        })
+
+        binding.rvControlCenter.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateControlCenterPadding()
+            binding.rvControlCenter.post { updateControlXmbTransforms() }
+        }
+    }
+
+    private fun loadControlCards() {
+        controlCards.clear()
+        controlCards.addAll(buildControlCards())
+        controlAdapter.updateCards(controlCards)
+        controlAdapter.selectedPosition = 0
+        controlPendingTarget = null
+        controlProgrammaticScroll = false
+        binding.rvControlCenter.post {
+            updateControlCenterPadding()
+            jumpControlToCenter(0)
+        }
+    }
+
+    private fun refreshControlCards() {
+        if (!::controlAdapter.isInitialized) return
+        val updated = buildControlCards()
+        if (controlCards.size != updated.size) {
+            controlCards.clear()
+            controlCards.addAll(updated)
+            controlAdapter.updateCards(controlCards)
+            return
+        }
+        for (i in updated.indices) {
+            if (controlCards[i] != updated[i]) {
+                controlCards[i] = updated[i]
+                controlAdapter.updateCardAt(i, updated[i])
+            }
+        }
+    }
+
+    private fun buildControlCards(): List<ControlCard> {
+        val wifiEnabled = isWifiEnabled()
+        val btEnabled = isBluetoothEnabled()
+        val dndEnabled = isDndEnabled()
+        val darkEnabled = isDarkModeEnabled()
+        val rotationEnabled = isRotationAutoEnabled()
+        val batterySaverEnabled = isBatterySaverEnabled()
+        val nightLightEnabled = isNightLightEnabled()
+
+        return listOf(
+            buildControlCardForState("wifi", wifiEnabled),
+            buildControlCardForState("bluetooth", btEnabled),
+            buildControlCardForState("dnd", dndEnabled),
+            buildControlCardForState("dark_mode", darkEnabled),
+            buildControlCardForState("rotation", rotationEnabled),
+            buildControlCardForState("battery_saver", batterySaverEnabled),
+            buildControlCardForState("night_light", nightLightEnabled)
+        )
+    }
+
+    private fun buildControlCardForState(id: String, enabled: Boolean): ControlCard {
+        return when (id) {
+            "wifi" -> ControlCard(
+                id = "wifi",
+                title = "Wi-Fi",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Wireless Enabled" else "Disabled",
+                iconRes = if (enabled) R.drawable.ic_wifi_rounded else R.drawable.ic_wifi_off_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_wifi_rounded else R.drawable.ic_wifi_off_rounded,
+                isEnabled = enabled
+            )
+            "bluetooth" -> ControlCard(
+                id = "bluetooth",
+                title = "Bluetooth",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Discoverable & Active" else "Disabled",
+                iconRes = if (enabled) R.drawable.ic_bluetooth_rounded else R.drawable.ic_bluetooth_disabled_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_bluetooth_rounded else R.drawable.ic_bluetooth_disabled_rounded,
+                isEnabled = enabled
+            )
+            "dnd" -> ControlCard(
+                id = "dnd",
+                title = "Do Not Disturb",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Notifications Silenced" else "Alerts Allowed",
+                iconRes = if (enabled) R.drawable.ic_dnd_rounded else R.drawable.ic_dnd_off_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_dnd_rounded else R.drawable.ic_dnd_off_rounded,
+                isEnabled = enabled
+            )
+            "dark_mode" -> ControlCard(
+                id = "dark_mode",
+                title = "Dark Mode",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Dark Theme Active" else "Light Theme Active",
+                iconRes = if (enabled) R.drawable.ic_dark_mode_rounded else R.drawable.ic_light_mode_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_dark_mode_rounded else R.drawable.ic_light_mode_rounded,
+                isEnabled = enabled
+            )
+            "rotation" -> ControlCard(
+                id = "rotation",
+                title = "Auto-Rotate",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Auto-Rotation Active" else "Rotation Locked",
+                iconRes = if (enabled) R.drawable.ic_screen_rotation_rounded else R.drawable.ic_screen_lock_rotation_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_screen_rotation_rounded else R.drawable.ic_screen_lock_rotation_rounded,
+                isEnabled = enabled
+            )
+            "battery_saver" -> ControlCard(
+                id = "battery_saver",
+                title = "Battery Saver",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Power Saving Active" else "Standard Power",
+                iconRes = if (enabled) R.drawable.ic_battery_saver_rounded else R.drawable.ic_battery_full_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_battery_saver_rounded else R.drawable.ic_battery_full_rounded,
+                isEnabled = enabled
+            )
+            "night_light" -> ControlCard(
+                id = "night_light",
+                title = "Night Light",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Warm Tint Active" else "Standard Display",
+                iconRes = if (enabled) R.drawable.ic_nightlight_rounded else R.drawable.ic_light_mode_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_nightlight_rounded else R.drawable.ic_light_mode_rounded,
+                isEnabled = enabled
+            )
+            else -> ControlCard(
+                id = id,
+                title = id,
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = "",
+                iconRes = R.drawable.ic_wifi_rounded,
+                cardIconRes = R.drawable.ic_wifi_rounded,
+                isEnabled = enabled
+            )
+        }
+    }
+
+    private fun isWifiEnabled(): Boolean {
+        val pending = pendingToggleStates["wifi"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawWifiState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("wifi")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("wifi")
+            }
+        }
+        return queryRawWifiState()
+    }
+
+    private fun queryRawWifiState(): Boolean {
+        return try {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wm != null) {
+                when (wm.wifiState) {
+                    WifiManager.WIFI_STATE_ENABLING, WifiManager.WIFI_STATE_ENABLED -> true
+                    WifiManager.WIFI_STATE_DISABLING, WifiManager.WIFI_STATE_DISABLED -> false
+                    else -> wm.isWifiEnabled
+                }
+            } else {
+                Settings.Global.getInt(contentResolver, Settings.Global.WIFI_ON, 0) != 0
+            }
+        } catch (e: Exception) {
+            try {
+                Settings.Global.getInt(contentResolver, Settings.Global.WIFI_ON, 0) != 0
+            } catch (ignored: Exception) {
+                false
+            }
+        }
+    }
+
+    private fun isBluetoothEnabled(): Boolean {
+        val pending = pendingToggleStates["bluetooth"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawBluetoothState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("bluetooth")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("bluetooth")
+            }
+        }
+        return queryRawBluetoothState()
+    }
+
+    private fun queryRawBluetoothState(): Boolean {
+        return try {
+            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val adapter = bm?.adapter
+            if (adapter != null) {
+                val state = try { adapter.state } catch (e: Exception) { -1 }
+                when (state) {
+                    BluetoothAdapter.STATE_TURNING_ON, BluetoothAdapter.STATE_ON -> true
+                    BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> false
+                    else -> adapter.isEnabled
+                }
+            } else {
+                Settings.Global.getInt(contentResolver, Settings.Global.BLUETOOTH_ON, 0) != 0
+            }
+        } catch (e: Exception) {
+            try {
+                Settings.Global.getInt(contentResolver, Settings.Global.BLUETOOTH_ON, 0) != 0
+            } catch (ignored: Exception) {
+                false
+            }
+        }
+    }
+
+    private fun isDndEnabled(): Boolean {
+        val pending = pendingToggleStates["dnd"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawDndState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("dnd")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("dnd")
+            }
+        }
+        return queryRawDndState()
+    }
+
+    private fun queryRawDndState(): Boolean {
+        return try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val filter = nm?.currentInterruptionFilter ?: NotificationManager.INTERRUPTION_FILTER_ALL
+            filter != NotificationManager.INTERRUPTION_FILTER_ALL &&
+                filter != NotificationManager.INTERRUPTION_FILTER_UNKNOWN
+        } catch (e: Exception) {
+            try {
+                Settings.Global.getInt(contentResolver, "zen_mode", 0) != 0
+            } catch (ignored: Exception) {
+                false
+            }
+        }
+    }
+
+    private fun isDarkModeEnabled(): Boolean {
+        val pending = pendingToggleStates["dark_mode"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawDarkModeState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("dark_mode")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("dark_mode")
+            }
+        }
+        return queryRawDarkModeState()
+    }
+
+    private fun queryRawDarkModeState(): Boolean {
+        return try {
+            val secureNight = Settings.Secure.getInt(contentResolver, "ui_night_mode", -1)
+            if (secureNight == 2) return true
+            if (secureNight == 1) return false
+            val uim = getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+            if (uim != null) {
+                uim.nightMode == UiModeManager.MODE_NIGHT_YES
+            } else {
+                (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            }
+        } catch (e: Exception) {
+            (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        }
+    }
+
+    private fun isRotationAutoEnabled(): Boolean {
+        val pending = pendingToggleStates["rotation"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawRotationAutoState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("rotation")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("rotation")
+            }
+        }
+        return queryRawRotationAutoState()
+    }
+
+    private fun queryRawRotationAutoState(): Boolean {
+        return try {
+            Settings.System.getInt(contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) == 1
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun isBatterySaverEnabled(): Boolean {
+        val pending = pendingToggleStates["battery_saver"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawBatterySaverState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("battery_saver")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("battery_saver")
+            }
+        }
+        return queryRawBatterySaverState()
+    }
+
+    private fun queryRawBatterySaverState(): Boolean {
+        return try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.isPowerSaveMode ?: (Settings.Global.getInt(contentResolver, "low_power", 0) != 0)
+        } catch (e: Exception) {
+            try {
+                Settings.Global.getInt(contentResolver, "low_power", 0) != 0
+            } catch (ignored: Exception) {
+                false
+            }
+        }
+    }
+
+    private fun isNightLightEnabled(): Boolean {
+        val pending = pendingToggleStates["night_light"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawNightLightState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("night_light")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("night_light")
+            }
+        }
+        return queryRawNightLightState()
+    }
+
+    private fun queryRawNightLightState(): Boolean {
+        return try {
+            Settings.Secure.getInt(contentResolver, "night_display_activated", 0) == 1
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun toggleSelectedControlCard() {
+        if (isTransitioningMode || controlCards.isEmpty()) return
+        val pos = findControlCenterPosition()
+            ?.takeIf { it in 0 until controlAdapter.itemCount }
+            ?: (controlPendingTarget ?: controlAdapter.selectedPosition)
+                .takeIf { it in 0 until controlAdapter.itemCount }
+            ?: return
+        toggleControlCardAt(pos)
+    }
+
+    private fun toggleControlCardAt(position: Int) {
+        if (position !in controlCards.indices) return
+        val currentCard = controlCards[position]
+        val targetState = !currentCard.isEnabled
+        triggerHaptic()
+
+        // Set pending toggle lock to prevent intermediate hardware states from reverting the UI
+        pendingToggleStates[currentCard.id] = PendingToggle(targetState, System.currentTimeMillis())
+
+        // Optimistically update UI immediately
+        val optimisticCard = buildControlCardForState(currentCard.id, targetState)
+        controlCards[position] = optimisticCard
+        controlAdapter.updateCardAt(position, optimisticCard)
+
+        // Animate a subtle press pulse on the card
+        val view = controlLayoutManager.findViewByPosition(position)
+        val cardContainer = view?.findViewById<View>(R.id.cardContainer)
+        cardContainer?.animate()?.cancel()
+        cardContainer?.animate()
+            ?.scaleX(0.95f)
+            ?.scaleY(0.95f)
+            ?.setDuration(70L)
+            ?.withEndAction {
+                cardContainer.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(110L)
+                    .start()
+            }
+            ?.start()
+
+        lifecycleScope.launch {
+            val handledInBackground = withContext(Dispatchers.IO) {
+                applyControlToggle(currentCard.id, targetState)
+            }
+            if (!handledInBackground) {
+                applyControlFallbackOnMain(currentCard.id, targetState)
+            }
+            // Verify state at progressive intervals until hardware confirms
+            val checkDelays = listOf(500L, 1000L, 2000L, 3500L)
+            for (checkDelay in checkDelays) {
+                delay(checkDelay)
+                if (isFinishing || isDestroyed) break
+                refreshControlCards()
+                if (!pendingToggleStates.containsKey(currentCard.id)) {
+                    break
+                }
+            }
+        }
+    }
+
+    private suspend fun applyControlToggle(id: String, enable: Boolean): Boolean {
+        val hasShizuku = ShizukuManager.hasShizukuPermission()
+        return when (id) {
+            "wifi" -> {
+                if (hasShizuku) {
+                    val cmdRes = ShizukuManager.execCommand("cmd", "wifi", "set-wifi-enabled", if (enable) "enabled" else "disabled")
+                    if (cmdRes.isSuccess) return true
+                    val svcRes = ShizukuManager.execCommand("svc", "wifi", if (enable) "enable" else "disable")
+                    if (svcRes.isSuccess) return true
+                }
+                try {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    @Suppress("DEPRECATION")
+                    if (wm != null && wm.setWifiEnabled(enable)) return true
+                } catch (ignored: Exception) {}
+                false
+            }
+            "bluetooth" -> {
+                if (hasShizuku) {
+                    val cmdRes = ShizukuManager.execCommand("cmd", "bluetooth_manager", if (enable) "enable" else "disable")
+                    if (cmdRes.isSuccess) return true
+                    val svcRes = ShizukuManager.execCommand("svc", "bluetooth", if (enable) "enable" else "disable")
+                    if (svcRes.isSuccess) return true
+                }
+                try {
+                    val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                    val adapter = bm?.adapter
+                    @Suppress("DEPRECATION", "MissingPermission")
+                    if (adapter != null) {
+                        val ok = if (enable) adapter.enable() else adapter.disable()
+                        if (ok) return true
+                    }
+                } catch (ignored: Exception) {}
+                false
+            }
+            "dnd" -> {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                if (nm != null && nm.isNotificationPolicyAccessGranted) {
+                    try {
+                        nm.setInterruptionFilter(
+                            if (enable) NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                            else NotificationManager.INTERRUPTION_FILTER_ALL
+                        )
+                        return true
+                    } catch (ignored: Exception) {}
+                }
+                if (hasShizuku) {
+                    val res = ShizukuManager.execCommand("cmd", "notification", "set_dnd", if (enable) "priority" else "off")
+                    if (res.isSuccess) return true
+                    val altRes = ShizukuManager.execCommand("cmd", "notification", "set_dnd", if (enable) "on" else "off")
+                    if (altRes.isSuccess) return true
+                }
+                false
+            }
+            "dark_mode" -> {
+                if (hasShizuku) {
+                    val res = ShizukuManager.execCommand("cmd", "uimode", "night", if (enable) "yes" else "no")
+                    if (res.isSuccess) return true
+                    val secRes = ShizukuManager.execCommand("settings", "put", "secure", "ui_night_mode", if (enable) "2" else "1")
+                    if (secRes.isSuccess) return true
+                }
+                false
+            }
+            "rotation" -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.System.canWrite(this)) {
+                    try {
+                        Settings.System.putInt(contentResolver, Settings.System.ACCELEROMETER_ROTATION, if (enable) 1 else 0)
+                        return true
+                    } catch (ignored: Exception) {}
+                }
+                if (hasShizuku) {
+                    val res = ShizukuManager.execCommand("settings", "put", "system", "accelerometer_rotation", if (enable) "1" else "0")
+                    if (res.isSuccess) return true
+                }
+                false
+            }
+            "battery_saver" -> {
+                if (hasShizuku) {
+                    val cmdRes = ShizukuManager.execCommand("cmd", "power", "set-mode", if (enable) "1" else "0")
+                    if (cmdRes.isSuccess) return true
+                    val secRes = ShizukuManager.execCommand("settings", "put", "global", "low_power", if (enable) "1" else "0")
+                    if (secRes.isSuccess) return true
+                }
+                false
+            }
+            "night_light" -> {
+                if (hasShizuku) {
+                    val cmdRes = ShizukuManager.execCommand("cmd", "color_display", "set-night-display-activated", if (enable) "1" else "0")
+                    if (cmdRes.isSuccess) return true
+                    val secRes = ShizukuManager.execCommand("settings", "put", "secure", "night_display_activated", if (enable) "1" else "0")
+                    if (secRes.isSuccess) return true
+                }
+                false
+            }
+            else -> false
+        }
+    }
+
+    private fun applyControlFallbackOnMain(id: String, enable: Boolean) {
+        try {
+            val intent = when (id) {
+                "wifi" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    Intent(Settings.Panel.ACTION_WIFI)
+                } else {
+                    Intent(Settings.ACTION_WIFI_SETTINGS)
+                }
+                "bluetooth" -> if (!enable) {
+                    Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                } else {
+                    Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                }
+                "dnd" -> Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                "dark_mode" -> Intent(Settings.ACTION_DISPLAY_SETTINGS)
+                "rotation" -> Intent(Settings.ACTION_DISPLAY_SETTINGS)
+                "battery_saver" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS)
+                } else {
+                    Intent(Intent.ACTION_POWER_USAGE_SUMMARY)
+                }
+                "night_light" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    Intent(Settings.ACTION_NIGHT_DISPLAY_SETTINGS)
+                } else {
+                    Intent(Settings.ACTION_DISPLAY_SETTINGS)
+                }
+                else -> null
+            }
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Fallback action failed for $id: ${e.message}")
+        }
+    }
+
+    private fun findControlCenterPosition(): Int? {
+        if (binding.rvControlCenter.width <= 0 || controlAdapter.itemCount == 0) return null
+        val centerX = binding.rvControlCenter.width / 2f
+        var bestPos: Int? = null
+        var bestDist = Float.MAX_VALUE
+        for (i in 0 until binding.rvControlCenter.childCount) {
+            val child = binding.rvControlCenter.getChildAt(i) ?: continue
+            if (child.right <= child.left) continue
+            val childCenter = (child.left + child.right) / 2f
+            val dist = kotlin.math.abs(centerX - childCenter)
+            if (dist < bestDist) {
+                bestDist = dist
+                bestPos = controlLayoutManager.getPosition(child)
+            }
+        }
+        return bestPos
+    }
+
+    private fun updateControlCenterPadding() {
+        val rvWidth = binding.rvControlCenter.width.takeIf { it > 0 }
+            ?: binding.overlayRoot.width.takeIf { it > 0 }
+            ?: resources.displayMetrics.widthPixels
+        if (rvWidth > 0) {
+            val itemW = getControlItemWidthPx()
+            val padding = ((rvWidth - itemW) / 2).coerceAtLeast(0)
+            if (binding.rvControlCenter.paddingStart != padding || binding.rvControlCenter.paddingEnd != padding) {
+                binding.rvControlCenter.setPadding(padding, 0, padding, 0)
+                binding.rvControlCenter.clipToPadding = false
+                binding.rvControlCenter.clipChildren = false
+            }
+        }
+    }
+
+    private fun updateControlXmbTransforms() {
+        if (binding.rvControlCenter.width <= 0) return
+        for (i in 0 until binding.rvControlCenter.childCount) {
+            val child = binding.rvControlCenter.getChildAt(i) ?: continue
+            applyControlXmbTransform(child)
+        }
+    }
+
+    private fun applyControlXmbTransform(child: View) {
+        if (child.right <= child.left || child.height <= 0) return
+        val centerX = binding.rvControlCenter.width / 2f
+        if (centerX <= 0f) return
+
+        val childCenter = (child.left + child.right) / 2f
+        val signed = centerX - childCenter
+        val distance = Math.abs(signed)
+
+        if (child.width > 0 && child.height > 0) {
+            child.pivotX = child.width / 2f
+            val cardBottom = child.findViewById<View>(R.id.cardContainer)?.bottom
+            child.pivotY = if (cardBottom != null && cardBottom > 0) {
+                cardBottom.toFloat().coerceAtMost(child.height.toFloat())
+            } else {
+                child.height.toFloat()
+            }
+        }
+
+        val cardWidth = child.width.toFloat()
+        if (cardWidth <= 0f) return
+
+        val fraction = (distance / cardWidth).coerceIn(0f, 1f)
+        val scale = 1.0f - (fraction * (1.0f - sideScale))
+        child.scaleX = scale
+        child.scaleY = scale
+
+        val extra = cardWidth * (1.0f - sideScale) / 2f
+        val pull = if (distance <= cardWidth) {
+            distance / cardWidth
+        } else {
+            (2f * distance / cardWidth) - 1f
+        }
+        child.translationX = Math.signum(signed) * extra * pull
+
+        if (child.alpha != 1f) child.alpha = 1f
+
+        val wantZ = if (distance < (child.width * 0.35f)) 20f else 0f
+        if (child.translationZ != wantZ) child.translationZ = wantZ
+
+        val isCenter = distance < (child.width * 0.35f)
+        val holder = binding.rvControlCenter.getChildViewHolder(child) as? DeckControlAdapter.ControlViewHolder
+        holder?.setCenterFocused(isCenter)
+    }
+
+    private fun smoothScrollControlToCenter(position: Int, isJumpFast: Boolean = false) {
+        if (position !in controlCards.indices || position !in 0 until controlAdapter.itemCount) return
+        controlPendingTarget = position
+        triggerHaptic()
+
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        if (prefs.isAnimOff(prefs.getAnimSpeed(this))) {
+            jumpControlToCenter(position)
+            controlPendingTarget = null
+            controlProgrammaticScroll = false
+            return
+        }
+        controlProgrammaticScroll = true
+        val baseSpeed = prefs.effectiveSpeed(prefs.getAnimSpeed(this))
+        val speed = if (isJumpFast) baseSpeed * 2.2f else baseSpeed
+        val maxScrollTime = if (isJumpFast) 160 else 350
+        val widthRatio = (getItemWidthPx().toFloat() / getControlItemWidthPx().toFloat().coerceAtLeast(1f))
+        val scroller = object : LinearSmoothScroller(this) {
+            override fun calculateDtToFit(
+                viewStart: Int,
+                viewEnd: Int,
+                boxStart: Int,
+                boxEnd: Int,
+                snapPreference: Int
+            ): Int {
+                return (boxStart + (boxEnd - boxStart) / 2) - (viewStart + (viewEnd - viewStart) / 2)
+            }
+
+            override fun calculateSpeedPerPixel(displayMetrics: DisplayMetrics): Float {
+                return ((80f / displayMetrics.densityDpi) / speed) * widthRatio
+            }
+
+            override fun calculateTimeForScrolling(dx: Int): Int {
+                return super.calculateTimeForScrolling(dx).coerceAtMost(maxScrollTime)
+            }
+        }
+        scroller.targetPosition = position
+        controlLayoutManager.startSmoothScroll(scroller)
+    }
+
+    private fun jumpControlToCenter(position: Int) {
+        if (position !in controlCards.indices) return
+        binding.rvControlCenter.stopScroll()
+        controlAdapter.selectedPosition = position
+
+        val rvW = binding.rvControlCenter.width
+        if (rvW <= 0) {
+            controlLayoutManager.scrollToPosition(position)
+            binding.rvControlCenter.post { updateControlXmbTransforms() }
+            return
+        }
+
+        val child = controlLayoutManager.findViewByPosition(position)
+        if (child != null && child.width > 0 && child.right > child.left) {
+            val childCenter = (child.left + child.right) / 2f
+            val centerX = rvW / 2f
+            val dx = Math.round(childCenter - centerX)
+            if (dx != 0) {
+                binding.rvControlCenter.scrollBy(dx, 0)
+            }
+            updateControlXmbTransforms()
+        } else {
+            val itemW = getControlItemWidthPx()
+            val offset = ((rvW - itemW) / 2 - binding.rvControlCenter.paddingStart)
+            try {
+                controlLayoutManager.scrollToPositionWithOffset(position, offset)
+            } catch (ignored: Throwable) {
+                controlLayoutManager.scrollToPosition(position)
+            }
+            binding.rvControlCenter.doOnNextLayout {
+                updateControlXmbTransforms()
+            }
+            binding.rvControlCenter.post { updateControlXmbTransforms() }
+        }
+    }
+
+    private fun moveControlSelection(delta: Int) {
+        if (isTransitioningMode || controlCards.isEmpty()) return
+        val base = controlPendingTarget ?: controlAdapter.selectedPosition
+        val newPos = (base + delta).coerceIn(0, controlCards.size - 1)
+        if (newPos != base) {
+            smoothScrollControlToCenter(newPos)
+        }
+    }
+
+    private fun switchOverlayMode(targetMode: OverlayMode, slideUp: Boolean) {
+        if (currentMode == targetMode || isTransitioningMode || killInFlight) return
+        if (binding.loadingLayout.visibility == View.VISIBLE) return
+
+        if (targetMode == OverlayMode.CONTROL_CENTER) {
+            refreshControlCards()
+        }
+
+        isTransitioningMode = true
+        triggerHaptic()
+
+        val outgoingView: View = if (currentMode == OverlayMode.APP_SWITCHER) {
+            if (tasks.isEmpty()) binding.emptyLayout else binding.rvTasks
+        } else {
+            binding.rvControlCenter
+        }
+
+        val incomingView: View = if (targetMode == OverlayMode.APP_SWITCHER) {
+            if (tasks.isEmpty()) binding.emptyLayout else binding.rvTasks
+        } else {
+            binding.rvControlCenter
+        }
+
+        // Cancel any active scrolls before transitioning
+        pendingTarget = null
+        programmaticScroll = false
+        controlPendingTarget = null
+        controlProgrammaticScroll = false
+        binding.rvTasks.stopScroll()
+        binding.rvControlCenter.stopScroll()
+
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        val closeSpeed = prefs.getCloseAnimSpeed(this)
+        modeTransitionAnimator?.cancel()
+        modeTransitionAnimator = null
+
+        val hiddenVisibility = if (outgoingView === binding.emptyLayout) View.GONE else View.INVISIBLE
+
+        if (prefs.isCloseAnimOff(closeSpeed)) {
+            outgoingView.visibility = hiddenVisibility
+            outgoingView.translationY = 0f
+            outgoingView.alpha = 1f
+
+            incomingView.translationY = 0f
+            incomingView.alpha = 1f
+            incomingView.visibility = View.VISIBLE
+            currentMode = targetMode
+            isTransitioningMode = false
+            if (targetMode == OverlayMode.CONTROL_CENTER) {
+                updateControlXmbTransforms()
+            } else if (tasks.isNotEmpty()) {
+                updateXmbTransforms()
+            }
+            return
+        }
+
+        val closeSpeedMult = (closeSpeed / com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_CLOSE_SPEED).coerceIn(0.5f, 3.0f)
+        val duration = (220L / closeSpeedMult).toLong().coerceIn(60L, 600L)
+
+        val baseHeight = outgoingView.height.takeIf { it > 0 }
+            ?: incomingView.height.takeIf { it > 0 }
+            ?: (getCardHeightPx() + (50 * resources.displayMetrics.density).toInt())
+        val flyDistance = baseHeight.toFloat() * 1.4f
+
+        val outgoingTargetY = if (slideUp) -flyDistance else flyDistance
+        val incomingStartY = if (slideUp) flyDistance else -flyDistance
+
+        if (targetMode == OverlayMode.CONTROL_CENTER) {
+            updateControlXmbTransforms()
+        } else if (tasks.isNotEmpty()) {
+            updateXmbTransforms()
+        }
+
+        outgoingView.translationY = 0f
+        outgoingView.alpha = 1f
+        incomingView.translationY = incomingStartY
+        incomingView.alpha = 0f
+        incomingView.visibility = View.VISIBLE
+
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            this.duration = duration
+            interpolator = DecelerateInterpolator(1.5f)
+            addUpdateListener { anim ->
+                if (isFinishing || isDestroyed) return@addUpdateListener
+                val f = anim.animatedValue as Float
+                outgoingView.translationY = outgoingTargetY * f
+                outgoingView.alpha = 1f - f
+                incomingView.translationY = incomingStartY * (1f - f)
+                incomingView.alpha = f
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    modeTransitionAnimator = null
+                    outgoingView.visibility = hiddenVisibility
+                    outgoingView.translationY = 0f
+                    outgoingView.alpha = 1f
+
+                    incomingView.translationY = 0f
+                    incomingView.alpha = 1f
+                    currentMode = targetMode
+                    isTransitioningMode = false
+                    if (targetMode == OverlayMode.CONTROL_CENTER) {
+                        updateControlXmbTransforms()
+                    } else if (tasks.isNotEmpty()) {
+                        updateXmbTransforms()
+                    }
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    modeTransitionAnimator = null
+                    isTransitioningMode = false
+                }
+            })
+        }
+        modeTransitionAnimator = animator
+        animator.start()
+    }
+
     private fun setupListeners() {
         // Tap outside to dismiss
         binding.overlayRoot.setOnClickListener {
-            if (killInFlight) return@setOnClickListener
+            if (killInFlight || isTransitioningMode) return@setOnClickListener
             dismissSwitcher()
         }
 
@@ -598,11 +1647,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     binding.ivEmptyIcon.setImageResource(R.drawable.ic_sentiment_neutral_rounded)
                     binding.tvEmptyMessage.setText(R.string.no_recent_items)
                 }
-                binding.rvTasks.visibility = View.GONE
-                binding.emptyLayout.visibility = View.VISIBLE
+                binding.rvTasks.visibility = View.INVISIBLE
+                binding.emptyLayout.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.GONE
             } else {
                 binding.emptyLayout.visibility = View.GONE
-                binding.rvTasks.visibility = View.VISIBLE
+                binding.rvTasks.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.INVISIBLE
 
                 taskAdapter.updateTasks(tasks)
 
@@ -1119,6 +2168,21 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register volume receiver: ${e.message}")
         }
+        try {
+            val controlFilter = IntentFilter().apply {
+                addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+                addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+                addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(controlCenterReceiver, controlFilter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(controlCenterReceiver, controlFilter)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register control center receiver: ${e.message}")
+        }
     }
 
     override fun onStop() {
@@ -1126,28 +2190,37 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         try {
             unregisterReceiver(volumeReceiver)
         } catch (ignored: Throwable) {}
+        try {
+            unregisterReceiver(controlCenterReceiver)
+        } catch (ignored: Throwable) {}
     }
 
     override fun onResume() {
         super.onResume()
         killInFlight = false
+        isTransitioningMode = false
         initBrightness()
         lastReportedVolume = getVolumePercent()
+        refreshControlCards()
     }
 
     override fun onPause() {
         super.onPause()
         killInFlight = false
+        isTransitioningMode = false
         gamepadHelper.reset()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         killInFlight = false
+        isTransitioningMode = false
         gamepadHelper.reset()
         indicatorHandler.removeCallbacksAndMessages(null)
         binding.layoutBrightness.animate().cancel()
         binding.layoutVolume.animate().cancel()
+        modeTransitionAnimator?.cancel()
+        modeTransitionAnimator = null
         pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
         pendingSlideRunnable = null
         slideAnimator?.cancel()
@@ -1307,27 +2380,76 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     // GamepadListener Callbacks
     override fun onNavLeft() {
-        moveSelection(-1)
+        if (isTransitioningMode) return
+        if (currentMode == OverlayMode.APP_SWITCHER) {
+            moveSelection(-1)
+        } else {
+            moveControlSelection(-1)
+        }
     }
 
     override fun onNavRight() {
-        moveSelection(1)
+        if (isTransitioningMode) return
+        if (currentMode == OverlayMode.APP_SWITCHER) {
+            moveSelection(1)
+        } else {
+            moveControlSelection(1)
+        }
+    }
+
+    override fun onNavUp() {
+        if (isTransitioningMode || killInFlight) return
+        val nextMode = if (currentMode == OverlayMode.APP_SWITCHER) {
+            OverlayMode.CONTROL_CENTER
+        } else {
+            OverlayMode.APP_SWITCHER
+        }
+        switchOverlayMode(nextMode, slideUp = true)
+    }
+
+    override fun onNavDown() {
+        if (isTransitioningMode || killInFlight) return
+        val nextMode = if (currentMode == OverlayMode.APP_SWITCHER) {
+            OverlayMode.CONTROL_CENTER
+        } else {
+            OverlayMode.APP_SWITCHER
+        }
+        switchOverlayMode(nextMode, slideUp = false)
     }
 
     override fun onNavStart() {
-        if (killInFlight || tasks.isEmpty()) return
-        val current = pendingTarget ?: taskAdapter.selectedPosition
-        if (current != 0) {
-            smoothScrollToCenter(0, isJumpFast = true)
+        if (isTransitioningMode || killInFlight) return
+        if (currentMode == OverlayMode.APP_SWITCHER) {
+            if (tasks.isEmpty()) return
+            val current = pendingTarget ?: taskAdapter.selectedPosition
+            if (current != 0) {
+                smoothScrollToCenter(0, isJumpFast = true)
+            }
+        } else {
+            if (controlCards.isEmpty()) return
+            val current = controlPendingTarget ?: controlAdapter.selectedPosition
+            if (current != 0) {
+                smoothScrollControlToCenter(0, isJumpFast = true)
+            }
         }
     }
 
     override fun onNavEnd() {
-        if (killInFlight || tasks.isEmpty()) return
-        val end = tasks.size - 1
-        val current = pendingTarget ?: taskAdapter.selectedPosition
-        if (current != end) {
-            smoothScrollToCenter(end, isJumpFast = true)
+        if (isTransitioningMode || killInFlight) return
+        if (currentMode == OverlayMode.APP_SWITCHER) {
+            if (tasks.isEmpty()) return
+            val end = tasks.size - 1
+            val current = pendingTarget ?: taskAdapter.selectedPosition
+            if (current != end) {
+                smoothScrollToCenter(end, isJumpFast = true)
+            }
+        } else {
+            if (controlCards.isEmpty()) return
+            val end = controlCards.size - 1
+            val current = controlPendingTarget ?: controlAdapter.selectedPosition
+            if (current != end) {
+                smoothScrollControlToCenter(end, isJumpFast = true)
+            }
         }
     }
 
@@ -1348,16 +2470,24 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onButtonSelect() {
-        switchSelectedTask()
+        if (isTransitioningMode) return
+        if (currentMode == OverlayMode.APP_SWITCHER) {
+            switchSelectedTask()
+        } else {
+            toggleSelectedControlCard()
+        }
     }
 
     override fun onButtonBack() {
-        if (killInFlight) return
+        if (killInFlight || isTransitioningMode) return
         dismissSwitcher()
     }
 
     override fun onButtonAction() {
-        killSelectedTask()
+        if (isTransitioningMode) return
+        if (currentMode == OverlayMode.APP_SWITCHER) {
+            killSelectedTask()
+        }
     }
 
 }

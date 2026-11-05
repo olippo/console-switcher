@@ -49,6 +49,27 @@
         app:layout_constraintStart_toStartOf="parent"
         tools:listitem="@layout/item_deck_task" />
 
+    <!-- Control Center Carousel: bottom-docked, shares baseline with recents -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvControlCenter"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="50dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:descendantFocusability="blocksDescendants"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:orientation="horizontal"
+        android:overScrollMode="never"
+        android:paddingStart="40dp"
+        android:paddingEnd="40dp"
+        android:visibility="invisible"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        tools:listitem="@layout/item_deck_control" />
+
     <!-- Loading View -->
     <LinearLayout
         android:id="@+id/loadingLayout"
