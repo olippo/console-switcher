@@ -856,8 +856,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 title = "Dark Mode",
                 statusPrimary = if (enabled) "On" else "Off",
                 statusSecondary = if (enabled) "Dark Theme Active" else "Light Theme Active",
-                iconRes = if (enabled) R.drawable.ic_dark_mode_rounded else R.drawable.ic_light_mode_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_dark_mode_rounded else R.drawable.ic_light_mode_rounded,
+                iconRes = R.drawable.ic_contrast_rounded,
+                cardIconRes = R.drawable.ic_contrast_rounded,
                 isEnabled = enabled
             )
             "rotation" -> ControlCard(
@@ -883,8 +883,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 title = "Night Light",
                 statusPrimary = if (enabled) "On" else "Off",
                 statusSecondary = if (enabled) "Warm Tint Active" else "Standard Display",
-                iconRes = if (enabled) R.drawable.ic_nightlight_rounded else R.drawable.ic_light_mode_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_nightlight_rounded else R.drawable.ic_light_mode_rounded,
+                iconRes = if (enabled) R.drawable.ic_nightlight_fill_rounded else R.drawable.ic_nightlight_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_nightlight_fill_rounded else R.drawable.ic_nightlight_rounded,
                 isEnabled = enabled
             )
             else -> ControlCard(
@@ -1581,10 +1581,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             addUpdateListener { anim ->
                 if (isFinishing || isDestroyed) return@addUpdateListener
                 val f = anim.animatedValue as Float
+                val fadeProgress = (f * 1.6f).coerceIn(0f, 1f)
                 outgoingView.translationY = outgoingTargetY * f
-                outgoingView.alpha = 1f - f
+                outgoingView.alpha = 1f - fadeProgress
                 incomingView.translationY = incomingStartY * (1f - f)
-                incomingView.alpha = f
+                incomingView.alpha = fadeProgress
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -2404,7 +2405,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         } else {
             OverlayMode.APP_SWITCHER
         }
-        switchOverlayMode(nextMode, slideUp = true)
+        switchOverlayMode(nextMode, slideUp = false)
     }
 
     override fun onNavDown() {
@@ -2414,7 +2415,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         } else {
             OverlayMode.APP_SWITCHER
         }
-        switchOverlayMode(nextMode, slideUp = false)
+        switchOverlayMode(nextMode, slideUp = true)
     }
 
     override fun onNavStart() {

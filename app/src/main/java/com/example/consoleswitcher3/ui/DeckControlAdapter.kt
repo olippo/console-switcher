@@ -142,6 +142,8 @@ class DeckControlAdapter(
             val context = itemView.context
             val standardBg = OverlayPrefs.getCardBg(context)
             cardContainer?.setCardBackgroundColor(standardBg)
+            val radius = OverlayPrefs.getCardCornerRadiusDp(context) * context.resources.displayMetrics.density
+            cardContainer?.radius = radius
 
             cardInnerLayout?.background = getFillDrawable()
             borderOverlay?.background = getStrokeDrawable(isFocused)
@@ -182,10 +184,11 @@ class DeckControlAdapter(
         private fun getFillDrawable(): android.graphics.drawable.Drawable {
             val context = itemView.context
             val fill = OverlayPrefs.getCardBg(context)
+            val radius = OverlayPrefs.getCardCornerRadiusDp(context) * context.resources.displayMetrics.density
             val d = GradientDrawable()
             d.shape = GradientDrawable.RECTANGLE
             d.setColor(fill)
-            d.cornerRadius = 8f * context.resources.displayMetrics.density
+            d.cornerRadius = radius
             return d
         }
 
@@ -195,11 +198,12 @@ class DeckControlAdapter(
             val borderWidthDp = OverlayPrefs.getBorderWidthDp(context)
             val cardBorder = OverlayPrefs.getCardBorder(context)
             val density = context.resources.displayMetrics.density
+            val radius = OverlayPrefs.getCardCornerRadiusDp(context) * density
 
             val d = GradientDrawable()
             d.shape = GradientDrawable.RECTANGLE
             d.setColor(android.graphics.Color.TRANSPARENT)
-            d.cornerRadius = 8f * density
+            d.cornerRadius = radius
             val strokeWidthPx = (borderWidthDp * density).toInt().coerceAtLeast(0)
 
             if (strokeWidthPx > 0) {

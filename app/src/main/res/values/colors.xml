@@ -6,8 +6,8 @@
     <!-- ConsoleSwitcher Dark Handheld Palette -->
     <color name="deck_bg_dark">#FF0D111A</color>
     <color name="deck_overlay_scrim">#EB090D14</color>
-    <color name="deck_card_bg">#FF151E2B</color>
-    <color name="deck_card_focused">#FF1C283B</color>
+    <color name="deck_card_bg">#FF1D1D1D</color>
+    <color name="deck_card_focused">#FF1D1D1D</color>
     <color name="deck_current_task_card_bg">#FF1D1D1D</color>
     <color name="deck_card_border">#334155</color>
     <color name="deck_card_border_focused">#00E5FF</color>

@@ -43,8 +43,8 @@
                 <!-- Current task resume arrow: shown instead of preview when app is currently open -->
                 <ImageView
                     android:id="@+id/ivCurrentTaskArrow"
-                    android:layout_width="56dp"
-                    android:layout_height="56dp"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:layout_gravity="center"
                     android:src="@drawable/ic_keyboard_arrow_up_rounded"
                     app:tint="@color/deck_text_primary"

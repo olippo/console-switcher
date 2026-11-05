@@ -1,4 +1,4 @@
-﻿package com.example.consoleswitcher3
+package com.example.consoleswitcher3
 
 import android.app.ActivityOptions
 import android.content.Intent
@@ -160,6 +160,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupCardStyle() {
         refreshCardStyleUi()
+        binding.btnPickCardBg.setOnClickListener {
+            ColorPickerDialog.show(this, OverlayPrefs.getCardBg(this), "Card background") { color ->
+                OverlayPrefs.setCardBg(this, color)
+                refreshCardStyleUi()
+            }
+        }
         binding.btnPickBorder.setOnClickListener {
             ColorPickerDialog.show(this, OverlayPrefs.getBorderColor(this), "Focused border color") { color ->
                 OverlayPrefs.setBorderColor(this, color)
@@ -179,11 +185,19 @@ class MainActivity : AppCompatActivity() {
                 refreshCardStyleUi()
             }
         }
+        binding.sliderCardCornerRadius.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                OverlayPrefs.setCardCornerRadiusDp(this, value)
+                binding.tvCardCornerRadiusValue.text = OverlayPrefs.cornerRadiusLabel(value)
+                refreshCardStyleUi()
+            }
+        }
         binding.btnResetColors.setOnClickListener {
             OverlayPrefs.setBorderColor(this, OverlayPrefs.DEFAULT_BORDER_COLOR)
             OverlayPrefs.setCardBorder(this, OverlayPrefs.DEFAULT_CARD_BORDER)
+            OverlayPrefs.setBorderWidthDp(this, OverlayPrefs.DEFAULT_BORDER_WIDTH)
+            OverlayPrefs.setCardCornerRadiusDp(this, OverlayPrefs.DEFAULT_CARD_CORNER_RADIUS)
             OverlayPrefs.setBgColor(this, OverlayPrefs.DEFAULT_BG_COLOR)
-            // Also clear retired settings keys so stale customs can't linger.
             OverlayPrefs.setCardBg(this, OverlayPrefs.DEFAULT_CARD_BG)
             OverlayPrefs.setCardFocusedBg(this, OverlayPrefs.DEFAULT_CARD_FOCUSED_BG)
             OverlayPrefs.setPreviewBg(this, OverlayPrefs.DEFAULT_PREVIEW_BG)
@@ -198,12 +212,33 @@ class MainActivity : AppCompatActivity() {
             binding.sliderBorderWidth.value = borderWidth
         }
         binding.tvBorderWidthValue.text = OverlayPrefs.borderWidthLabel(borderWidth)
+
+        val radius = OverlayPrefs.getCardCornerRadiusDp(this)
+        if (binding.sliderCardCornerRadius.value != radius) {
+            binding.sliderCardCornerRadius.value = radius
+        }
+        binding.tvCardCornerRadiusValue.text = OverlayPrefs.cornerRadiusLabel(radius)
+
         refreshBorderPreview()
         val density = resources.displayMetrics.density
+        val previewRadius = (radius.coerceIn(0f, 16f)) * density
+        val cardBg = OverlayPrefs.getCardBg(this)
+
+        binding.cardBgPreview.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = previewRadius
+            setColor(cardBg)
+            setStroke(
+                (1f * density).toInt().coerceAtLeast(1),
+                OverlayPrefs.getCardBorder(this@MainActivity)
+            )
+        }
+        binding.tvCardBgHex.text = OverlayPrefs.colorHex(cardBg)
+
         binding.cardBorderPreview.background = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-            cornerRadius = 6f * density
-            setColor(OverlayPrefs.getCardBg(this@MainActivity))
+            cornerRadius = previewRadius
+            setColor(cardBg)
             setStroke(
                 (borderWidth * density).toInt().coerceAtLeast(0),
                 OverlayPrefs.getCardBorder(this@MainActivity)
@@ -267,10 +302,12 @@ class MainActivity : AppCompatActivity() {
     private fun refreshBorderPreview() {
         val density = resources.displayMetrics.density
         val borderColor = OverlayPrefs.getBorderColor(this)
+        val radius = OverlayPrefs.getCardCornerRadiusDp(this)
+        val previewRadius = (radius.coerceIn(0f, 16f)) * density
         val preview = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-            cornerRadius = 6f * density
-            setColor(OverlayPrefs.getCardFocusedBg(this@MainActivity))
+            cornerRadius = previewRadius
+            setColor(OverlayPrefs.getCardBg(this@MainActivity))
             val strokePx = (OverlayPrefs.getBorderWidthDp(this@MainActivity) * density).toInt().coerceAtLeast(0)
             setStroke(strokePx, borderColor)
         }

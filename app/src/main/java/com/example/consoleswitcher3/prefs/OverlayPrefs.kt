@@ -1,4 +1,4 @@
-﻿package com.example.consoleswitcher3.prefs
+package com.example.consoleswitcher3.prefs
 
 import android.content.Context
 
@@ -18,6 +18,7 @@ object OverlayPrefs {
     const val KEY_CARD_BG = "card_bg"
     const val KEY_CARD_FOCUSED_BG = "card_focused_bg"
     const val KEY_CARD_BORDER = "card_border"
+    const val KEY_CARD_CORNER_RADIUS = "card_corner_radius"
     const val KEY_PREVIEW_BG = "preview_bg"
 
     /** 1.0 = default console navigation speed (matches former 0.5x). Higher = faster. */
@@ -66,10 +67,12 @@ object OverlayPrefs {
     const val DEFAULT_BORDER_COLOR = 0xFF00E5FF.toInt()
     /** Card border thickness in dp (focused + unfocused). 0 = no border. */
     const val DEFAULT_BORDER_WIDTH = 2.5f
-    /** Unfocused card fill (ARGB). */
-    const val DEFAULT_CARD_BG = 0xFF151E2B.toInt()
-    /** Focused card fill (ARGB). */
-    const val DEFAULT_CARD_FOCUSED_BG = 0xFF1C283B.toInt()
+    /** Card corner radius in dp. Hardcoded default is 8dp. */
+    const val DEFAULT_CARD_CORNER_RADIUS = 8f
+    /** Unfocused card fill (ARGB). Default is the currently open app's color (#1D1D1D). */
+    const val DEFAULT_CARD_BG = 0xFF1D1D1D.toInt()
+    /** Focused card fill (ARGB). Default is the currently open app's color (#1D1D1D). */
+    const val DEFAULT_CARD_FOCUSED_BG = 0xFF1D1D1D.toInt()
     /** Unfocused card border (ARGB). */
     const val DEFAULT_CARD_BORDER = 0xFF334155.toInt()
     /** Placeholder behind previews when no snapshot/icon yet (ARGB). */
@@ -378,8 +381,9 @@ object OverlayPrefs {
 
     fun getCardBg(context: Context): Int {
         return try {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            val color = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .getInt(KEY_CARD_BG, DEFAULT_CARD_BG)
+            if (color == 0xFF151E2B.toInt()) DEFAULT_CARD_BG else color
         } catch (ignored: Throwable) {
             DEFAULT_CARD_BG
         }
@@ -390,14 +394,16 @@ object OverlayPrefs {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .edit()
                 .putInt(KEY_CARD_BG, color)
+                .putInt(KEY_CARD_FOCUSED_BG, color)
                 .apply()
         } catch (ignored: Throwable) {}
     }
 
     fun getCardFocusedBg(context: Context): Int {
         return try {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            val color = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .getInt(KEY_CARD_FOCUSED_BG, DEFAULT_CARD_FOCUSED_BG)
+            if (color == 0xFF1C283B.toInt() || color == 0xFF151E2B.toInt()) DEFAULT_CARD_FOCUSED_BG else color
         } catch (ignored: Throwable) {
             DEFAULT_CARD_FOCUSED_BG
         }
@@ -410,6 +416,29 @@ object OverlayPrefs {
                 .putInt(KEY_CARD_FOCUSED_BG, color)
                 .apply()
         } catch (ignored: Throwable) {}
+    }
+
+    fun getCardCornerRadiusDp(context: Context): Float {
+        return try {
+            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .getFloat(KEY_CARD_CORNER_RADIUS, DEFAULT_CARD_CORNER_RADIUS)
+                .coerceIn(0f, 32f)
+        } catch (ignored: Throwable) {
+            DEFAULT_CARD_CORNER_RADIUS
+        }
+    }
+
+    fun setCardCornerRadiusDp(context: Context, radiusDp: Float) {
+        try {
+            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .edit()
+                .putFloat(KEY_CARD_CORNER_RADIUS, radiusDp.coerceIn(0f, 32f))
+                .apply()
+        } catch (ignored: Throwable) {}
+    }
+
+    fun cornerRadiusLabel(radiusDp: Float): String {
+        return "${radiusDp.toInt()} dp"
     }
 
     fun getCardBorder(context: Context): Int {
