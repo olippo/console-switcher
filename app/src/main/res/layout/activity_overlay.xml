@@ -209,4 +209,40 @@
             tools:text="100%" />
     </LinearLayout>
 
+    <!-- Media Playback Indicator (Same position as Volume & Brightness: Bottom Left) -->
+    <LinearLayout
+        android:id="@+id/layoutMedia"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="28dp"
+        android:layout_marginBottom="18dp"
+        android:clickable="false"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        tools:visibility="visible"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <ImageView
+            android:id="@+id/ivMediaIcon"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:contentDescription="Media"
+            android:src="@drawable/ic_music_note_rounded"
+            app:tint="@color/deck_text_primary" />
+
+        <TextView
+            android:id="@+id/tvMedia"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:fontFamily="sans-serif-medium"
+            android:textColor="@color/deck_text_primary"
+            android:textSize="14sp"
+            tools:text="Paused" />
+    </LinearLayout>
+
 </androidx.constraintlayout.widget.ConstraintLayout>

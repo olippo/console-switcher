@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -131,6 +132,17 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             .start()
     }
 
+    private val hideMediaRunnable = Runnable {
+        binding.layoutMedia.animate()
+            .alpha(0f)
+            .setDuration(250)
+            .withEndAction {
+                binding.layoutMedia.visibility = View.GONE
+                binding.layoutMedia.alpha = 1f
+            }
+            .start()
+    }
+
     private val volumeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val currentVol = getVolumePercent()
@@ -234,6 +246,12 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 it.marginStart = baseMarginSide + bars.left
                 it.bottomMargin = baseMarginBottom + bars.bottom
                 binding.layoutVolume.layoutParams = it
+            }
+
+            (binding.layoutMedia.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
+                it.marginStart = baseMarginSide + bars.left
+                it.bottomMargin = baseMarginBottom + bars.bottom
+                binding.layoutMedia.layoutParams = it
             }
 
             insets
@@ -2220,6 +2238,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         indicatorHandler.removeCallbacksAndMessages(null)
         binding.layoutBrightness.animate().cancel()
         binding.layoutVolume.animate().cancel()
+        binding.layoutMedia.animate().cancel()
         modeTransitionAnimator?.cancel()
         modeTransitionAnimator = null
         pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
@@ -2243,10 +2262,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         val percent = ((currentBrightness / 255.0f) * 100f).roundToInt().coerceIn(0, 100)
         binding.tvBrightness.text = "$percent%"
 
-        // Dismiss volume if it's currently showing
+        // Dismiss volume and media if currently showing
         indicatorHandler.removeCallbacks(hideVolumeRunnable)
         binding.layoutVolume.animate().cancel()
         binding.layoutVolume.visibility = View.GONE
+
+        indicatorHandler.removeCallbacks(hideMediaRunnable)
+        binding.layoutMedia.animate().cancel()
+        binding.layoutMedia.visibility = View.GONE
 
         indicatorHandler.removeCallbacks(hideBrightnessRunnable)
         binding.layoutBrightness.animate().cancel()
@@ -2267,10 +2290,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         lastReportedVolume = percent
         binding.tvVolume.text = "$percent%"
 
-        // Dismiss brightness if it's currently showing
+        // Dismiss brightness and media if currently showing
         indicatorHandler.removeCallbacks(hideBrightnessRunnable)
         binding.layoutBrightness.animate().cancel()
         binding.layoutBrightness.visibility = View.GONE
+
+        indicatorHandler.removeCallbacks(hideMediaRunnable)
+        binding.layoutMedia.animate().cancel()
+        binding.layoutMedia.visibility = View.GONE
 
         indicatorHandler.removeCallbacks(hideVolumeRunnable)
         binding.layoutVolume.animate().cancel()
@@ -2290,6 +2317,115 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to adjust volume", e)
         }
+    }
+
+    private fun showMediaIndicator(text: String) {
+        binding.tvMedia.text = text
+
+        // Dismiss brightness and volume if currently showing
+        indicatorHandler.removeCallbacks(hideBrightnessRunnable)
+        binding.layoutBrightness.animate().cancel()
+        binding.layoutBrightness.visibility = View.GONE
+
+        indicatorHandler.removeCallbacks(hideVolumeRunnable)
+        binding.layoutVolume.animate().cancel()
+        binding.layoutVolume.visibility = View.GONE
+
+        indicatorHandler.removeCallbacks(hideMediaRunnable)
+        binding.layoutMedia.animate().cancel()
+        binding.layoutMedia.alpha = 1f
+        binding.layoutMedia.visibility = View.VISIBLE
+        indicatorHandler.postDelayed(hideMediaRunnable, INDICATOR_TIMEOUT_MS)
+    }
+
+    private var lastMediaToggleTime = 0L
+
+    private fun toggleBackgroundMedia() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMediaToggleTime < 350L) return
+        lastMediaToggleTime = now
+
+        triggerHaptic()
+        lifecycleScope.launch(Dispatchers.Main) {
+            val isPlaying = audioManager.isMusicActive
+            if (isPlaying) {
+                // Audio is currently playing -> explicitly pause it
+                sendMediaCommand(play = false)
+                showMediaIndicator("Paused")
+            } else {
+                val hasSession = checkHasMediaSession()
+                if (hasSession) {
+                    // There is an active media session waiting -> explicitly play/resume it
+                    sendMediaCommand(play = true)
+                    showMediaIndicator("Unpaused")
+                } else {
+                    // No recognized active session: attempt play and verify if audio starts
+                    sendMediaCommand(play = true)
+                    withContext(Dispatchers.IO) {
+                        delay(150)
+                    }
+                    if (audioManager.isMusicActive) {
+                        showMediaIndicator("Unpaused")
+                    } else {
+                        showMediaIndicator("No Media")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sendMediaCommand(play: Boolean) {
+        val hasShizuku = ShizukuManager.hasShizukuPermission()
+        if (hasShizuku) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    val cmd = if (play) "play" else "pause"
+                    val res = ShizukuManager.execCommand("cmd", "media_session", "dispatch", cmd)
+                    if (!res.isSuccess) {
+                        val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
+                        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                    }
+                } catch (ignored: Throwable) {
+                    val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
+                    audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                    audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                }
+            }
+        } else {
+            try {
+                val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
+                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            } catch (ignored: Throwable) {}
+        }
+    }
+
+    private suspend fun checkHasMediaSession(): Boolean = withContext(Dispatchers.IO) {
+        if (!ShizukuManager.hasShizukuPermission()) return@withContext false
+        try {
+            val res = ShizukuManager.execCommand("cmd", "media_session", "list-sessions")
+            if (res.isSuccess && res.output.isNotBlank()) {
+                val validLines = res.output.lines().filter { line ->
+                    line.isNotBlank() &&
+                    !line.startsWith("Sessions:") &&
+                    !line.contains("com.android.bluetooth")
+                }
+                if (validLines.isNotEmpty()) return@withContext true
+            }
+
+            val dumpRes = ShizukuManager.execCommand("dumpsys", "media_session")
+            if (dumpRes.isSuccess && dumpRes.output.isNotBlank()) {
+                val out = dumpRes.output
+                val hasSession = !out.contains("Media button session is null")
+                val hasActive = out.lines().any { it.contains("active=true") && !it.contains("com.android.bluetooth") }
+                val hasPlayingOrPaused = out.contains("state=2") || out.contains("state=3")
+                if (hasSession || hasActive || hasPlayingOrPaused) {
+                    return@withContext true
+                }
+            }
+        } catch (ignored: Throwable) {}
+        false
     }
 
     private fun changeBrightness(delta: Int) {
@@ -2489,6 +2625,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         if (currentMode == OverlayMode.APP_SWITCHER) {
             killSelectedTask()
         }
+    }
+
+    override fun onButtonY() {
+        if (killInFlight || isTransitioningMode) return
+        toggleBackgroundMedia()
     }
 
 }

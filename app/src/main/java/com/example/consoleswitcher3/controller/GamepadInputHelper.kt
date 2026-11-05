@@ -17,6 +17,7 @@ class GamepadInputHelper(private val listener: GamepadListener) {
         fun onButtonSelect()  // A / Enter
         fun onButtonBack()    // B / Back
         fun onButtonAction()  // X (Close/Kill)
+        fun onButtonY()       // Y (Play/Pause background media)
         fun onVolumeDown()    // L1 Bumper
         fun onVolumeUp()      // R1 Bumper
         fun onBrightnessDown()// L2 Trigger
@@ -265,9 +266,15 @@ class GamepadInputHelper(private val listener: GamepadListener) {
                 }
                 true
             }
+            KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_Y -> {
+                if (isDown && event.repeatCount == 0) {
+                    listener.onButtonY()
+                }
+                true
+            }
             // Swallow all remaining buttons so they do nothing and don't fall through
             // to the framework focus search (which paints a grey veil on the view).
-            KeyEvent.KEYCODE_BUTTON_Y,
             KeyEvent.KEYCODE_MENU,
             KeyEvent.KEYCODE_BUTTON_START,
             KeyEvent.KEYCODE_BUTTON_SELECT,
