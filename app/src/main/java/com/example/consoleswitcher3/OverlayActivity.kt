@@ -735,6 +735,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             }
 
             override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                if (suppressIdleCommit) return
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                     controlProgrammaticScroll = false
                     controlPendingTarget = null
@@ -1471,7 +1472,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private fun jumpControlToCenter(position: Int) {
         if (position !in controlCards.indices) return
-        binding.rvControlCenter.stopScroll()
+        suppressIdleCommit = true
+        try {
+            controlPendingTarget = null
+            controlProgrammaticScroll = false
+            binding.rvControlCenter.stopScroll()
+        } finally {
+            suppressIdleCommit = false
+        }
         controlAdapter.selectedPosition = position
 
         val rvW = binding.rvControlCenter.width
@@ -1537,13 +1545,37 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             binding.rvControlCenter
         }
 
-        // Cancel any active scrolls before transitioning
-        pendingTarget = null
-        programmaticScroll = false
-        controlPendingTarget = null
-        controlProgrammaticScroll = false
-        binding.rvTasks.stopScroll()
-        binding.rvControlCenter.stopScroll()
+        // Capture intended target positions before stopping active scrolls so neither
+        // carousel is ever left stranded halfway between two cards.
+        val targetTaskPos = if (tasks.isNotEmpty()) {
+            (pendingTarget ?: findCenterPosition() ?: taskAdapter.selectedPosition)
+                .coerceIn(0, tasks.size - 1)
+        } else 0
+        val targetControlPos = if (controlCards.isNotEmpty()) {
+            (controlPendingTarget ?: findControlCenterPosition() ?: controlAdapter.selectedPosition)
+                .coerceIn(0, controlCards.size - 1)
+        } else 0
+
+        // Cancel any active scrolls before transitioning with suppressIdleCommit so
+        // RecyclerView.stopScroll() doesn't re-entrantly start & abort a snap scroll.
+        suppressIdleCommit = true
+        try {
+            pendingTarget = null
+            programmaticScroll = false
+            controlPendingTarget = null
+            controlProgrammaticScroll = false
+            binding.rvTasks.stopScroll()
+            binding.rvControlCenter.stopScroll()
+        } finally {
+            suppressIdleCommit = false
+        }
+
+        if (tasks.isNotEmpty()) {
+            taskAdapter.selectedPosition = targetTaskPos
+        }
+        if (controlCards.isNotEmpty()) {
+            controlAdapter.selectedPosition = targetControlPos
+        }
 
         val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
         val closeSpeed = prefs.getCloseAnimSpeed(this)
@@ -1556,6 +1588,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             outgoingView.visibility = hiddenVisibility
             outgoingView.translationY = 0f
             outgoingView.alpha = 1f
+
+            if (tasks.isNotEmpty()) {
+                jumpToCenter(targetTaskPos)
+            }
+            if (controlCards.isNotEmpty()) {
+                jumpControlToCenter(targetControlPos)
+            }
 
             incomingView.translationY = 0f
             incomingView.alpha = 1f
@@ -1581,9 +1620,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         val outgoingTargetY = if (slideUp) -flyDistance else flyDistance
         val incomingStartY = if (slideUp) flyDistance else -flyDistance
 
+        // Ensure incoming carousel is snapped to exact center before it becomes visible
         if (targetMode == OverlayMode.CONTROL_CENTER) {
+            if (controlCards.isNotEmpty()) {
+                jumpControlToCenter(targetControlPos)
+            }
             updateControlXmbTransforms()
         } else if (tasks.isNotEmpty()) {
+            jumpToCenter(targetTaskPos)
             updateXmbTransforms()
         }
 
@@ -1611,6 +1655,16 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     outgoingView.visibility = hiddenVisibility
                     outgoingView.translationY = 0f
                     outgoingView.alpha = 1f
+
+                    // Snap the now-hidden outgoing carousel to its target card so it is
+                    // already aligned when switching back later.
+                    if (targetMode == OverlayMode.CONTROL_CENTER) {
+                        if (tasks.isNotEmpty()) {
+                            jumpToCenter(targetTaskPos)
+                        }
+                    } else if (controlCards.isNotEmpty()) {
+                        jumpControlToCenter(targetControlPos)
+                    }
 
                     incomingView.translationY = 0f
                     incomingView.alpha = 1f
@@ -1761,7 +1815,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
      */
     private fun jumpToCenter(position: Int) {
         if (position !in tasks.indices) return
-        binding.rvTasks.stopScroll()
+        suppressIdleCommit = true
+        try {
+            pendingTarget = null
+            programmaticScroll = false
+            binding.rvTasks.stopScroll()
+        } finally {
+            suppressIdleCommit = false
+        }
         taskAdapter.selectedPosition = position
 
         val rvW = binding.rvTasks.width
@@ -1844,9 +1905,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         triggerHaptic()
 
         // Stop any in-flight navigation scroll immediately
-        pendingTarget = null
-        programmaticScroll = false
-        binding.rvTasks.stopScroll()
+        suppressIdleCommit = true
+        try {
+            pendingTarget = null
+            programmaticScroll = false
+            binding.rvTasks.stopScroll()
+        } finally {
+            suppressIdleCommit = false
+        }
 
         // Asynchronously execute kill in background without blocking the UI animation
         lifecycleScope.launch {
