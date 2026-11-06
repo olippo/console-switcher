@@ -1807,8 +1807,12 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun switchTask(task: DeckTask) {
+        triggerHaptic()
+        if (task.isCurrentTask) {
+            dismissSwitcher()
+            return
+        }
         lifecycleScope.launch {
-            triggerHaptic()
             TaskManager.switchTask(this@OverlayActivity, task)
             dismissSwitcher()
         }

@@ -169,14 +169,20 @@ class DeckTaskAdapter(
             ivTaskPreview.setBackgroundColor(
                 com.example.consoleswitcher3.prefs.OverlayPrefs.getPreviewBg(itemView.context)
             )
+            val density = itemView.resources.displayMetrics.density
+            val radius = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(itemView.context) * density
+            cardContainer?.radius = radius
+
+            val standardBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardBg(itemView.context)
+            val focusedBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardFocusedBg(itemView.context)
             // Keep the CardView shell in sync with the fill so corners match.
             cardContainer?.setCardBackgroundColor(
                 if (task.isCurrentTask) {
-                    0xFF1D1D1D.toInt()
+                    standardBg
                 } else if (isSelected) {
-                    com.example.consoleswitcher3.prefs.OverlayPrefs.getCardFocusedBg(itemView.context)
+                    focusedBg
                 } else {
-                    com.example.consoleswitcher3.prefs.OverlayPrefs.getCardBg(itemView.context)
+                    standardBg
                 }
             )
             bindPreviewOnly(task)
@@ -193,12 +199,14 @@ class DeckTaskAdapter(
             }
             tvAppTitle?.text = task.label
 
-            itemView.setOnClickListener {
+            val clickAction = {
                 val pos = bindingAdapterPosition
                 if (pos != RecyclerView.NO_POSITION) {
                     getTaskAt(pos)?.let { onTaskClick(pos, it) }
                 }
             }
+            itemView.setOnClickListener { clickAction() }
+            cardContainer?.setOnClickListener { clickAction() }
         }
 
         /** Second-pass snapshot arrival: swap the image only, no transform reset. */

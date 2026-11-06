@@ -594,6 +594,9 @@ object TaskManager {
      * Switches to the specified task with a consistent zoom-from-center animation.
      */
     suspend fun switchTask(context: Context, task: DeckTask): Boolean = withContext(Dispatchers.IO) {
+        if (task.isCurrentTask) {
+            return@withContext true
+        }
         // Shared zoom-from-center launch options so every reopen looks the same
         // regardless of which switch path succeeds.
         val zoomOptions: Bundle? = try {

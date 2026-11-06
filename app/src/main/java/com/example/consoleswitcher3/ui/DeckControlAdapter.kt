@@ -78,18 +78,18 @@ class DeckControlAdapter(
     override fun onBindViewHolder(holder: ControlViewHolder, position: Int) {
         val card = cards[position]
         holder.bind(card, position == selectedPosition)
-        holder.itemView.setOnClickListener {
-            onCardClick(position, cards[position])
-        }
+        val clickAction = { onCardClick(position, cards[position]) }
+        holder.itemView.setOnClickListener { clickAction() }
+        holder.cardContainer?.setOnClickListener { clickAction() }
     }
 
     override fun onBindViewHolder(holder: ControlViewHolder, position: Int, payloads: MutableList<Any>) {
         if (payloads.contains(PAYLOAD_STATE_CHANGE)) {
             val card = cards[position]
             holder.bindCardContent(card)
-            holder.itemView.setOnClickListener {
-                onCardClick(position, cards[position])
-            }
+            val clickAction = { onCardClick(position, cards[position]) }
+            holder.itemView.setOnClickListener { clickAction() }
+            holder.cardContainer?.setOnClickListener { clickAction() }
         } else {
             super.onBindViewHolder(holder, position, payloads)
         }
