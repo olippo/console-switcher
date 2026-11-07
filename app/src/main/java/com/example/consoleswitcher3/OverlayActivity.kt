@@ -1,22 +1,32 @@
 package com.example.consoleswitcher3
 
+import android.Manifest
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.NotificationManager
 import android.app.UiModeManager
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothClass
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
+import android.os.IInterface
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
@@ -35,27 +45,32 @@ import android.media.AudioManager
 import android.provider.Settings
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnNextLayout
+import androidx.core.widget.ImageViewCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.LinearSmoothScroller
 import androidx.recyclerview.widget.RecyclerView
 import com.example.consoleswitcher3.controller.GamepadInputHelper
 import com.example.consoleswitcher3.databinding.ActivityOverlayBinding
+import com.example.consoleswitcher3.model.BluetoothDeviceItem
 import com.example.consoleswitcher3.model.ControlCard
 import com.example.consoleswitcher3.model.DeckTask
 import com.example.consoleswitcher3.shizuku.ShizukuManager
 import com.example.consoleswitcher3.task.TaskManager
+import com.example.consoleswitcher3.ui.BluetoothDeviceAdapter
 import com.example.consoleswitcher3.ui.DeckControlAdapter
 import com.example.consoleswitcher3.ui.DeckTaskAdapter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import rikka.shizuku.ShizukuBinderWrapper
 import kotlin.math.roundToInt
 
 class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener {
@@ -71,9 +86,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private lateinit var layoutManager: LinearLayoutManager
     private lateinit var controlAdapter: DeckControlAdapter
     private lateinit var controlLayoutManager: LinearLayoutManager
+    private lateinit var bluetoothDeviceAdapter: BluetoothDeviceAdapter
+    private lateinit var bluetoothLayoutManager: LinearLayoutManager
 
     private var currentMode: OverlayMode = OverlayMode.APP_SWITCHER
     private var isTransitioningMode: Boolean = false
+    private var isBluetoothMenuOpen: Boolean = false
+    private val busyBluetoothAddresses = mutableMapOf<String, String>()
+    private val bluetoothProfiles = mutableMapOf<Int, BluetoothProfile>()
 
     /** Target of the in-flight programmatic scroll, if any. While set,
      *  navigation chains off it (not the last committed position) so rapid
@@ -162,6 +182,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         private const val MAX_BRIGHTNESS = 255
         private const val INDICATOR_TIMEOUT_MS = 2000L
         private const val PENDING_TOGGLE_TIMEOUT_MS = 4000L
+        private const val REQUEST_CODE_BLUETOOTH_PERMS = 2002
+        private const val PROFILE_HID_HOST = 4 // BluetoothProfile.HID_HOST / INPUT_DEVICE
+        private const val ACTION_BLUETOOTH_SETTINGS = "__bluetooth_settings__"
     }
 
     private data class PendingToggle(
@@ -195,7 +218,61 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                             pendingToggleStates.remove("bluetooth")
                         }
                     }
+                    if (state == BluetoothAdapter.STATE_ON) {
+                        initBluetoothProfiles()
+                    } else if (state == BluetoothAdapter.STATE_OFF) {
+                        busyBluetoothAddresses.clear()
+                    }
                     refreshControlCards()
+                    if (isBluetoothMenuOpen) {
+                        refreshBluetoothMenuUi()
+                    }
+                }
+                BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED,
+                BluetoothDevice.ACTION_ACL_CONNECTED,
+                BluetoothDevice.ACTION_ACL_DISCONNECTED,
+                "android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED",
+                "android.bluetooth.headset.profile.action.CONNECTION_STATE_CHANGED",
+                "android.bluetooth.input.profile.action.CONNECTION_STATE_CHANGED",
+                "android.bluetooth.hid.profile.action.CONNECTION_STATE_CHANGED",
+                "android.bluetooth.action.LE_AUDIO_CONNECTION_STATE_CHANGED" -> {
+                    val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    val addr = device?.address
+                    val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1)
+                        .takeIf { it != -1 }
+                        ?: intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE, -1)
+
+                    if (addr != null) {
+                        when (state) {
+                            BluetoothProfile.STATE_CONNECTED -> {
+                                busyBluetoothAddresses.remove(addr)
+                            }
+                            BluetoothProfile.STATE_DISCONNECTED -> {
+                                if (!isDeviceConnected(device) && !isDeviceConnecting(device)) {
+                                    busyBluetoothAddresses.remove(addr)
+                                }
+                            }
+                            BluetoothProfile.STATE_CONNECTING -> {
+                                if (busyBluetoothAddresses[addr] != "Disconnecting...") {
+                                    busyBluetoothAddresses[addr] = "Connecting..."
+                                }
+                            }
+                            BluetoothProfile.STATE_DISCONNECTING -> {
+                                busyBluetoothAddresses[addr] = "Disconnecting..."
+                            }
+                        }
+                        if (intent.action == BluetoothDevice.ACTION_ACL_DISCONNECTED) {
+                            busyBluetoothAddresses.remove(addr)
+                        }
+                    }
+                    if (isBluetoothMenuOpen) {
+                        refreshBluetoothMenuUi()
+                    }
                 }
                 NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED -> {
                     pendingToggleStates.remove("dnd")
@@ -297,6 +374,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         setupRecyclerView()
         setupControlRecyclerView()
+        setupBluetoothMenu()
+        initBluetoothProfiles()
         setupListeners()
         loadControlCards()
         loadTasks()
@@ -702,7 +781,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 if (!isTransitioningMode) {
                     val current = controlPendingTarget ?: controlAdapter.selectedPosition
                     if (clickedPosition == current) {
-                        toggleControlCardAt(clickedPosition)
+                        openControlMenuAt(clickedPosition)
                     } else {
                         smoothScrollControlToCenter(clickedPosition)
                     }
@@ -1158,11 +1237,36 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         toggleControlCardAt(pos)
     }
 
+    private fun openSelectedControlMenu() {
+        if (isTransitioningMode || controlCards.isEmpty()) return
+        val pos = findControlCenterPosition()
+            ?.takeIf { it in 0 until controlAdapter.itemCount }
+            ?: (controlPendingTarget ?: controlAdapter.selectedPosition)
+                .takeIf { it in 0 until controlAdapter.itemCount }
+            ?: return
+        openControlMenuAt(pos)
+    }
+
+    private fun openControlMenuAt(position: Int) {
+        if (position !in controlCards.indices) return
+        val currentCard = controlCards[position]
+        triggerHaptic()
+        animateCardPress(position)
+
+        when (currentCard.id) {
+            "bluetooth" -> openBluetoothPanel()
+            else -> {
+                // Wi-Fi and other control menus to be implemented later
+            }
+        }
+    }
+
     private fun toggleControlCardAt(position: Int) {
         if (position !in controlCards.indices) return
         val currentCard = controlCards[position]
         val targetState = !currentCard.isEnabled
         triggerHaptic()
+        animateCardPress(position)
 
         // Set pending toggle lock to prevent intermediate hardware states from reverting the UI
         pendingToggleStates[currentCard.id] = PendingToggle(targetState, System.currentTimeMillis())
@@ -1171,23 +1275,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         val optimisticCard = buildControlCardForState(currentCard.id, targetState)
         controlCards[position] = optimisticCard
         controlAdapter.updateCardAt(position, optimisticCard)
-
-        // Animate a subtle press pulse on the card
-        val view = controlLayoutManager.findViewByPosition(position)
-        val cardContainer = view?.findViewById<View>(R.id.cardContainer)
-        cardContainer?.animate()?.cancel()
-        cardContainer?.animate()
-            ?.scaleX(0.95f)
-            ?.scaleY(0.95f)
-            ?.setDuration(70L)
-            ?.withEndAction {
-                cardContainer.animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(110L)
-                    .start()
-            }
-            ?.start()
 
         lifecycleScope.launch {
             val handledInBackground = withContext(Dispatchers.IO) {
@@ -1205,6 +1292,676 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 if (!pendingToggleStates.containsKey(currentCard.id)) {
                     break
                 }
+            }
+        }
+    }
+
+    private fun animateCardPress(position: Int) {
+        val view = controlLayoutManager.findViewByPosition(position)
+        val cardContainer = view?.findViewById<View>(R.id.cardContainer)
+        cardContainer?.animate()?.cancel()
+        cardContainer?.animate()
+            ?.scaleX(0.95f)
+            ?.scaleY(0.95f)
+            ?.setDuration(70L)
+            ?.withEndAction {
+                cardContainer.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(110L)
+                    .start()
+            }
+            ?.start()
+    }
+
+    private fun openBluetoothPanel() {
+        openBluetoothMenu()
+    }
+
+    private fun setupBluetoothMenu() {
+        bluetoothLayoutManager = LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
+        binding.rvBluetoothDevices.layoutManager = bluetoothLayoutManager
+        binding.rvBluetoothDevices.itemAnimator = null
+
+        bluetoothDeviceAdapter = BluetoothDeviceAdapter(
+            items = emptyList(),
+            onItemClick = { _, item ->
+                triggerHaptic()
+                handleBluetoothDeviceItemAction(item)
+            }
+        )
+        binding.rvBluetoothDevices.adapter = bluetoothDeviceAdapter
+
+        binding.bluetoothMenuOverlay.setOnClickListener {
+            closeBluetoothMenu()
+        }
+        binding.cardBluetoothModal.setOnClickListener {
+            // Consume clicks inside the modal card so it doesn't close
+        }
+    }
+
+    private fun initBluetoothProfiles() {
+        try {
+            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val adapter = bm?.adapter ?: return
+            val profileListener = object : BluetoothProfile.ServiceListener {
+                override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                    bluetoothProfiles[profile] = proxy
+                    if (isBluetoothMenuOpen) {
+                        refreshBluetoothMenuUi()
+                    }
+                }
+
+                override fun onServiceDisconnected(profile: Int) {
+                    bluetoothProfiles.remove(profile)
+                }
+            }
+            val profilesToBind = mutableListOf(
+                BluetoothProfile.HEADSET,
+                BluetoothProfile.A2DP,
+                PROFILE_HID_HOST
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                profilesToBind.add(21) // BluetoothProfile.HEARING_AID
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                profilesToBind.add(22) // BluetoothProfile.LE_AUDIO
+            }
+            for (p in profilesToBind) {
+                if (!bluetoothProfiles.containsKey(p)) {
+                    try {
+                        adapter.getProfileProxy(applicationContext, profileListener, p)
+                    } catch (ignored: Throwable) {}
+                }
+            }
+        } catch (ignored: Throwable) {}
+    }
+
+    private fun closeBluetoothProfiles() {
+        try {
+            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val adapter = bm?.adapter ?: return
+            for ((profileId, proxy) in bluetoothProfiles) {
+                try {
+                    adapter.closeProfileProxy(profileId, proxy)
+                } catch (ignored: Throwable) {}
+            }
+            bluetoothProfiles.clear()
+        } catch (ignored: Throwable) {}
+    }
+
+    private fun hasBluetoothRuntimePermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun ensureBluetoothPermissions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val hasConnect = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasConnect) return
+
+        if (ShizukuManager.hasShizukuPermission()) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    ShizukuManager.execCommand("pm", "grant", packageName, Manifest.permission.BLUETOOTH_CONNECT)
+                } catch (ignored: Throwable) {}
+                withContext(Dispatchers.Main) {
+                    initBluetoothProfiles()
+                    if (isBluetoothMenuOpen) {
+                        refreshBluetoothMenuUi()
+                    }
+                }
+            }
+        } else {
+            try {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT),
+                    REQUEST_CODE_BLUETOOTH_PERMS
+                )
+            } catch (ignored: Throwable) {}
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CODE_BLUETOOTH_PERMS) {
+            initBluetoothProfiles()
+            if (isBluetoothMenuOpen) {
+                refreshBluetoothMenuUi()
+            }
+        }
+    }
+
+    private fun applyBluetoothModalStyling() {
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        val density = resources.displayMetrics.density
+        val cardBg = prefs.getCardBg(this)
+        val cardBorder = prefs.getCardBorder(this)
+
+        // Menus have a hardcoded 8dp corner radius
+        val radiusPx = 16f * density
+        val strokePx = (prefs.getBorderWidthDp(this).coerceAtLeast(1.5f) * density).toInt()
+
+        binding.cardBluetoothModal.setCardBackgroundColor(Color.TRANSPARENT)
+        binding.cardBluetoothModal.radius = radiusPx
+
+        // Solution A: Combine fill & stroke in a single GradientDrawable so corners never bleed
+        val combinedDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radiusPx
+            setColor(cardBg)
+            setStroke(strokePx, cardBorder)
+        }
+        binding.bluetoothModalInner.background = combinedDrawable
+        binding.vBluetoothModalBorder.background = null
+        binding.tvBluetoothEmpty.setTextColor(cardBorder)
+    }
+
+    private fun openBluetoothMenu() {
+        if (isBluetoothMenuOpen) return
+        isBluetoothMenuOpen = true
+
+        applyBluetoothModalStyling()
+        ensureBluetoothPermissions()
+        initBluetoothProfiles()
+        refreshBluetoothMenuUi()
+
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        val closeSpeed = prefs.getCloseAnimSpeed(this)
+        val isOff = prefs.isCloseAnimOff(closeSpeed)
+
+        binding.bluetoothMenuOverlay.animate().cancel()
+        binding.cardBluetoothModal.animate().cancel()
+        binding.rvControlCenter.animate().cancel()
+
+        binding.bluetoothMenuOverlay.visibility = View.VISIBLE
+        if (isOff) {
+            binding.bluetoothMenuOverlay.alpha = 1f
+            binding.cardBluetoothModal.scaleX = 1f
+            binding.cardBluetoothModal.scaleY = 1f
+            binding.rvControlCenter.alpha = 0.25f
+            return
+        }
+
+        val speedMult = (closeSpeed / com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_CLOSE_SPEED).coerceIn(0.5f, 3.0f)
+        val duration = (180L / speedMult).toLong().coerceIn(60L, 400L)
+
+        binding.bluetoothMenuOverlay.alpha = 0f
+        binding.cardBluetoothModal.scaleX = 0.92f
+        binding.cardBluetoothModal.scaleY = 0.92f
+
+        binding.bluetoothMenuOverlay.animate()
+            .alpha(1f)
+            .setDuration(duration)
+            .setInterpolator(DecelerateInterpolator(1.5f))
+            .start()
+
+        binding.cardBluetoothModal.animate()
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(duration)
+            .setInterpolator(DecelerateInterpolator(1.5f))
+            .start()
+
+        binding.rvControlCenter.animate()
+            .alpha(0.25f)
+            .setDuration(duration)
+            .start()
+    }
+
+    private fun closeBluetoothMenu() {
+        if (!isBluetoothMenuOpen) return
+        isBluetoothMenuOpen = false
+        triggerHaptic()
+
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        val closeSpeed = prefs.getCloseAnimSpeed(this)
+        val isOff = prefs.isCloseAnimOff(closeSpeed)
+
+        binding.bluetoothMenuOverlay.animate().cancel()
+        binding.cardBluetoothModal.animate().cancel()
+        binding.rvControlCenter.animate().cancel()
+
+        if (isOff) {
+            binding.bluetoothMenuOverlay.visibility = View.GONE
+            binding.bluetoothMenuOverlay.alpha = 1f
+            binding.rvControlCenter.alpha = 1f
+            refreshControlCards()
+            return
+        }
+
+        val speedMult = (closeSpeed / com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_CLOSE_SPEED).coerceIn(0.5f, 3.0f)
+        val duration = (150L / speedMult).toLong().coerceIn(50L, 350L)
+
+        binding.bluetoothMenuOverlay.animate()
+            .alpha(0f)
+            .setDuration(duration)
+            .setInterpolator(AccelerateInterpolator(1.4f))
+            .withEndAction {
+                if (!isBluetoothMenuOpen) {
+                    binding.bluetoothMenuOverlay.visibility = View.GONE
+                    binding.bluetoothMenuOverlay.alpha = 1f
+                }
+            }
+            .start()
+
+        binding.cardBluetoothModal.animate()
+            .scaleX(0.92f)
+            .scaleY(0.92f)
+            .setDuration(duration)
+            .setInterpolator(AccelerateInterpolator(1.4f))
+            .start()
+
+        binding.rvControlCenter.animate()
+            .alpha(1f)
+            .setDuration(duration)
+            .start()
+
+        refreshControlCards()
+    }
+
+    private fun toggleBluetoothFromModal() {
+        val btIdx = controlCards.indexOfFirst { it.id == "bluetooth" }
+        if (btIdx >= 0) {
+            toggleControlCardAt(btIdx)
+            binding.rvBluetoothDevices.postDelayed({
+                if (!isFinishing && !isDestroyed && isBluetoothMenuOpen) {
+                    refreshBluetoothMenuUi()
+                }
+            }, 150L)
+            refreshBluetoothMenuUi()
+        }
+    }
+
+    private fun isDeviceConnected(device: BluetoothDevice): Boolean {
+        try {
+            val method = BluetoothDevice::class.java.getMethod("isConnected")
+            val connected = method.invoke(device) as? Boolean
+            if (connected == true) return true
+        } catch (ignored: Throwable) {}
+
+        for (proxy in bluetoothProfiles.values) {
+            try {
+                @Suppress("MissingPermission")
+                if (proxy.getConnectionState(device) == BluetoothProfile.STATE_CONNECTED) {
+                    return true
+                }
+            } catch (ignored: Throwable) {}
+        }
+        return false
+    }
+
+    private fun isDeviceConnecting(device: BluetoothDevice): Boolean {
+        for (proxy in bluetoothProfiles.values) {
+            try {
+                @Suppress("MissingPermission")
+                if (proxy.getConnectionState(device) == BluetoothProfile.STATE_CONNECTING) {
+                    return true
+                }
+            } catch (ignored: Throwable) {}
+        }
+        return false
+    }
+
+    private fun isDeviceDisconnecting(device: BluetoothDevice): Boolean {
+        for (proxy in bluetoothProfiles.values) {
+            try {
+                @Suppress("MissingPermission")
+                if (proxy.getConnectionState(device) == BluetoothProfile.STATE_DISCONNECTING) {
+                    return true
+                }
+            } catch (ignored: Throwable) {}
+        }
+        return false
+    }
+
+    private fun isDeviceAclConnected(device: BluetoothDevice): Boolean {
+        return try {
+            val method = BluetoothDevice::class.java.getMethod("isConnected")
+            (method.invoke(device) as? Boolean) == true
+        } catch (ignored: Throwable) {
+            false
+        }
+    }
+
+    private fun getBluetoothDeviceIcon(device: BluetoothDevice): Int {
+        return try {
+            @Suppress("MissingPermission")
+            val btClass = device.bluetoothClass
+            val major = btClass?.majorDeviceClass
+            val name = (device.name ?: "").lowercase()
+            when {
+                major == BluetoothClass.Device.Major.PERIPHERAL ||
+                    name.contains("controller") ||
+                    name.contains("gamepad") ||
+                    name.contains("xbox") ||
+                    name.contains("dualsense") ||
+                    name.contains("dualshock") ||
+                    name.contains("8bitdo") ||
+                    name.contains("joy-con") ||
+                    name.contains("pro controller") ||
+                    name.contains("gamesir") -> R.drawable.ic_gamepad_rounded
+                major == BluetoothClass.Device.Major.AUDIO_VIDEO ||
+                    name.contains("airpods") ||
+                    name.contains("buds") ||
+                    name.contains("headphone") ||
+                    name.contains("headset") ||
+                    name.contains("speaker") -> R.drawable.ic_headphones_rounded
+                else -> R.drawable.ic_bluetooth_rounded
+            }
+        } catch (ignored: Throwable) {
+            R.drawable.ic_bluetooth_rounded
+        }
+    }
+
+    private fun queryBluetoothDeviceItems(): List<BluetoothDeviceItem> {
+        if (!isBluetoothEnabled() || !hasBluetoothRuntimePermission()) return emptyList()
+        val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = bm?.adapter ?: return emptyList()
+
+        val items = mutableListOf<BluetoothDeviceItem>()
+
+        try {
+            @Suppress("MissingPermission")
+            val bonded = adapter.bondedDevices ?: emptySet()
+            for (device in bonded) {
+                val addr = device.address ?: continue
+                @Suppress("MissingPermission")
+                val name = device.name?.takeIf { it.isNotBlank() } ?: addr
+                val connected = isDeviceConnected(device)
+                val busyText = busyBluetoothAddresses[addr]
+                val isDisconnecting = busyText == "Disconnecting..." || isDeviceDisconnecting(device)
+                val isConnecting = (busyText != null && !isDisconnecting) || (!connected && isDeviceConnecting(device))
+                val isBusy = if (connected) isDisconnecting else isConnecting
+                val isCleanConnected = connected && !isDisconnecting
+
+                val statusText = when {
+                    isBusy -> (busyText ?: if (isDisconnecting) "Disconnecting..." else "Connecting...")
+                    isCleanConnected -> "Connected"
+                    else -> ""
+                }
+                items.add(
+                    BluetoothDeviceItem(
+                        address = addr,
+                        name = name,
+                        isConnected = isCleanConnected,
+                        isBusy = isBusy,
+                        statusText = statusText,
+                        iconRes = getBluetoothDeviceIcon(device),
+                        device = device,
+                        isSettingsAction = false
+                    )
+                )
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Error querying bonded devices: ${e.message}")
+        }
+
+        // Sort paired devices: Connected first, then alphabetically
+        items.sortWith(
+            compareByDescending<BluetoothDeviceItem> { it.isConnected }
+                .thenBy { it.name.lowercase() }
+        )
+
+        // Append button to pair new device (opens system Bluetooth Settings) at the end of the list
+        items.add(
+            BluetoothDeviceItem(
+                address = ACTION_BLUETOOTH_SETTINGS,
+                name = "Pair new device",
+                isConnected = false,
+                isBusy = false,
+                statusText = "",
+                iconRes = R.drawable.ic_add_rounded,
+                device = null,
+                isSettingsAction = true
+            )
+        )
+
+        return items
+    }
+
+    private fun refreshBluetoothMenuUi() {
+        val enabled = isBluetoothEnabled()
+
+        if (!enabled) {
+            bluetoothDeviceAdapter.updateDevices(emptyList())
+            binding.rvBluetoothDevices.visibility = View.INVISIBLE
+            binding.tvBluetoothEmpty.visibility = View.VISIBLE
+            binding.tvBluetoothEmpty.text = "Bluetooth is turned off\nPress (X) to turn on"
+            return
+        }
+
+        if (!hasBluetoothRuntimePermission()) {
+            bluetoothDeviceAdapter.updateDevices(emptyList())
+            binding.rvBluetoothDevices.visibility = View.INVISIBLE
+            binding.tvBluetoothEmpty.visibility = View.VISIBLE
+            binding.tvBluetoothEmpty.text = "Bluetooth permission required\nPress (A) to grant"
+            return
+        }
+
+        val items = queryBluetoothDeviceItems()
+        bluetoothDeviceAdapter.updateDevices(items)
+
+        binding.tvBluetoothEmpty.visibility = View.GONE
+        binding.rvBluetoothDevices.visibility = View.VISIBLE
+    }
+
+    private fun moveBluetoothSelection(delta: Int) {
+        val count = bluetoothDeviceAdapter.itemCount
+        if (count <= 0) return
+        val newPos = (bluetoothDeviceAdapter.selectedPosition + delta).coerceIn(0, count - 1)
+        if (newPos != bluetoothDeviceAdapter.selectedPosition) {
+            triggerHaptic()
+            bluetoothDeviceAdapter.selectedPosition = newPos
+            binding.rvBluetoothDevices.scrollToPosition(newPos)
+        }
+    }
+
+    private fun handleSelectedBluetoothDeviceAction() {
+        if (!isBluetoothEnabled()) {
+            toggleBluetoothFromModal()
+            return
+        }
+        if (!hasBluetoothRuntimePermission()) {
+            triggerHaptic()
+            ensureBluetoothPermissions()
+            return
+        }
+        val selected = bluetoothDeviceAdapter.getSelectedDevice() ?: return
+        triggerHaptic()
+        handleBluetoothDeviceItemAction(selected)
+    }
+
+    private fun handleBluetoothDeviceItemAction(item: BluetoothDeviceItem) {
+        if (item.isSettingsAction) {
+            openSystemBluetoothSettings()
+            return
+        }
+        val device = item.device ?: return
+        val targetConnect = !item.isConnected
+        triggerBluetoothDeviceConnection(device, targetConnect)
+    }
+
+    private fun openSystemBluetoothSettings() {
+        try {
+            val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to open Bluetooth settings: ${e.message}")
+        }
+        dismissSwitcher()
+    }
+
+    private fun triggerBluetoothDeviceConnection(device: BluetoothDevice, connect: Boolean) {
+        val addr = device.address ?: return
+        busyBluetoothAddresses[addr] = if (connect) "Connecting..." else "Disconnecting..."
+        refreshBluetoothMenuUi()
+
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                connectOrDisconnectBluetoothDevice(device, connect)
+            }
+
+            val startTime = SystemClock.uptimeMillis()
+            val maxWaitMs = 15000L
+            while (SystemClock.uptimeMillis() - startTime < maxWaitMs) {
+                delay(400L)
+                if (isFinishing || isDestroyed) break
+
+                val nowConnected = isDeviceConnected(device)
+                val nowConnecting = isDeviceConnecting(device)
+
+                if (connect) {
+                    if (nowConnected) {
+                        busyBluetoothAddresses.remove(addr)
+                        if (isBluetoothMenuOpen) refreshBluetoothMenuUi()
+                        return@launch
+                    }
+                    val elapsed = SystemClock.uptimeMillis() - startTime
+                    // If after 5s neither profiles nor ACL link is active, connection attempt failed
+                    if (elapsed > 5000L && !nowConnecting && !nowConnected && !isDeviceAclConnected(device)) {
+                        break
+                    }
+                } else {
+                    if (!nowConnected) {
+                        busyBluetoothAddresses.remove(addr)
+                        if (isBluetoothMenuOpen) refreshBluetoothMenuUi()
+                        return@launch
+                    }
+                }
+            }
+
+            busyBluetoothAddresses.remove(addr)
+            if (!isFinishing && !isDestroyed && isBluetoothMenuOpen) {
+                refreshBluetoothMenuUi()
+            }
+        }
+    }
+
+    private fun connectOrDisconnectBluetoothDevice(device: BluetoothDevice, connect: Boolean): Boolean {
+        val methodName = if (connect) "connect" else "disconnect"
+        var anySucceeded = false
+
+        // 1. Try direct method on BluetoothDevice (available on Android 10-12 & many OEM builds)
+        try {
+            val m = BluetoothDevice::class.java.getMethod(methodName)
+            m.isAccessible = true
+            val res = m.invoke(device) as? Boolean
+            if (res == true) anySucceeded = true
+        } catch (ignored: Throwable) {}
+
+        // 2. Try via active BluetoothProfile proxies (HID_HOST for controllers, A2DP/HEADSET for audio)
+        for ((_, profile) in bluetoothProfiles) {
+            if (!connect) {
+                val isCurrentlyConnectedOnProfile = try {
+                    @Suppress("MissingPermission")
+                    profile.getConnectionState(device) == BluetoothProfile.STATE_CONNECTED
+                } catch (ignored: Throwable) { true }
+                if (!isCurrentlyConnectedOnProfile) continue
+            }
+            if (invokeProfileConnectOrDisconnect(profile, device, methodName)) {
+                anySucceeded = true
+            }
+        }
+        return anySucceeded
+    }
+
+    private fun invokeProfileConnectOrDisconnect(
+        profile: BluetoothProfile,
+        device: BluetoothDevice,
+        methodName: String
+    ): Boolean {
+        // Attempt A: Direct reflection on profile proxy
+        try {
+            val method = profile.javaClass.getMethod(methodName, BluetoothDevice::class.java)
+            method.isAccessible = true
+            val ok = method.invoke(profile, device) as? Boolean
+            if (ok == true) return true
+        } catch (ignored: Throwable) {}
+
+        // Attempt B: Privileged call via ShizukuBinderWrapper (executes as UID 2000 shell with BLUETOOTH_PRIVILEGED)
+        if (!ShizukuManager.hasShizukuPermission()) return false
+        return try {
+            invokeProfileWithShizuku(profile, device, methodName)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Shizuku profile $methodName failed: ${e.message}")
+            false
+        }
+    }
+
+    private fun invokeProfileWithShizuku(
+        profile: BluetoothProfile,
+        device: BluetoothDevice,
+        methodName: String
+    ): Boolean {
+        val profileClass = profile.javaClass
+
+        // Locate the underlying AIDL IInterface service (either on profile.mService or profile.mProfileConnector.mService)
+        var serviceHolder: Any = profile
+        var serviceField = try {
+            profileClass.getDeclaredField("mService").apply { isAccessible = true }
+        } catch (ignored: Throwable) { null }
+
+        if (serviceField == null) {
+            val connectorField = try {
+                profileClass.getDeclaredField("mProfileConnector").apply { isAccessible = true }
+            } catch (ignored: Throwable) { null }
+            val connector = connectorField?.get(profile)
+            if (connector != null) {
+                serviceHolder = connector
+                serviceField = try {
+                    connector.javaClass.getDeclaredField("mService").apply { isAccessible = true }
+                } catch (ignored: Throwable) { null }
+            }
+        }
+
+        val originalService = serviceField?.get(serviceHolder) as? IInterface ?: return false
+        val rawBinder = originalService.asBinder() ?: return false
+        val wrappedBinder = if (rawBinder is ShizukuBinderWrapper) rawBinder else ShizukuBinderWrapper(rawBinder)
+        val stubClass = originalService.javaClass.enclosingClass ?: return false
+        val asInterface = stubClass.getMethod("asInterface", IBinder::class.java)
+        val wrappedService = asInterface.invoke(null, wrappedBinder) ?: return false
+
+        // Temporarily swap mAttributionSource to shell (UID 2000) on API 31+ so system_server accepts the privileged binder call
+        val attrField = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                profileClass.getDeclaredField("mAttributionSource").apply { isAccessible = true }
+            } catch (ignored: Throwable) { null }
+        } else null
+        val originalAttr = attrField?.get(profile)
+
+        try {
+            serviceField.set(serviceHolder, wrappedService)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && attrField != null) {
+                val shellAttr = android.content.AttributionSource.Builder(ShizukuManager.getShizukuUid())
+                    .setPackageName("com.android.shell")
+                    .build()
+                attrField.set(profile, shellAttr)
+            }
+            val method = profileClass.getMethod(methodName, BluetoothDevice::class.java)
+            method.isAccessible = true
+            return (method.invoke(profile, device) as? Boolean) == true
+        } finally {
+            try {
+                serviceField.set(serviceHolder, originalService)
+            } catch (ignored: Throwable) {}
+            if (attrField != null && originalAttr != null) {
+                try {
+                    attrField.set(profile, originalAttr)
+                } catch (ignored: Throwable) {}
             }
         }
     }
@@ -2261,6 +3018,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             val controlFilter = IntentFilter().apply {
                 addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
                 addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+                addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
+                addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+                addAction("android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED")
+                addAction("android.bluetooth.headset.profile.action.CONNECTION_STATE_CHANGED")
+                addAction("android.bluetooth.input.profile.action.CONNECTION_STATE_CHANGED")
+                addAction("android.bluetooth.hid.profile.action.CONNECTION_STATE_CHANGED")
+                addAction("android.bluetooth.action.LE_AUDIO_CONNECTION_STATE_CHANGED")
                 addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
                 addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
             }
@@ -2291,6 +3056,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         initBrightness()
         lastReportedVolume = getVolumePercent()
         refreshControlCards()
+        if (isBluetoothMenuOpen) {
+            applyBluetoothModalStyling()
+            refreshBluetoothMenuUi()
+        }
     }
 
     override fun onPause() {
@@ -2304,6 +3073,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         super.onDestroy()
         killInFlight = false
         isTransitioningMode = false
+        closeBluetoothProfiles()
         gamepadHelper.reset()
         indicatorHandler.removeCallbacksAndMessages(null)
         binding.layoutBrightness.animate().cancel()
@@ -2420,82 +3190,103 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             val isPlaying = audioManager.isMusicActive
             if (isPlaying) {
                 // Audio is currently playing -> explicitly pause it
-                sendMediaCommand(play = false)
                 showMediaIndicator("Paused")
+                withContext(Dispatchers.IO) {
+                    sendMediaCommandSync(play = false)
+                }
             } else {
-                val hasSession = checkHasMediaSession()
-                if (hasSession) {
-                    // There is an active media session waiting -> explicitly play/resume it
-                    sendMediaCommand(play = true)
+                // Audio is not playing -> check if a paused session exists, send play,
+                // and verify that playback actually starts before showing "Unpaused".
+                val startedPlaying = withContext(Dispatchers.IO) {
+                    val hasShizuku = ShizukuManager.hasShizukuPermission()
+                    if (hasShizuku) {
+                        val hadPausedSession = hasActiveSessionInState(paused = true)
+                        if (!hadPausedSession) {
+                            return@withContext false
+                        }
+                        sendMediaCommandSync(play = true)
+                        for (i in 0 until 8) {
+                            delay(45)
+                            if (audioManager.isMusicActive) {
+                                return@withContext true
+                            }
+                        }
+                        hasActiveSessionInState(paused = false)
+                    } else {
+                        sendMediaCommandSync(play = true)
+                        for (i in 0 until 8) {
+                            delay(45)
+                            if (audioManager.isMusicActive) {
+                                return@withContext true
+                            }
+                        }
+                        false
+                    }
+                }
+
+                if (startedPlaying) {
                     showMediaIndicator("Unpaused")
                 } else {
-                    // No recognized active session: attempt play and verify if audio starts
-                    sendMediaCommand(play = true)
-                    withContext(Dispatchers.IO) {
-                        delay(150)
-                    }
-                    if (audioManager.isMusicActive) {
-                        showMediaIndicator("Unpaused")
-                    } else {
-                        showMediaIndicator("No Media")
-                    }
+                    showMediaIndicator("No Media")
                 }
             }
         }
     }
 
-    private fun sendMediaCommand(play: Boolean) {
-        val hasShizuku = ShizukuManager.hasShizukuPermission()
-        if (hasShizuku) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                try {
-                    val cmd = if (play) "play" else "pause"
-                    val res = ShizukuManager.execCommand("cmd", "media_session", "dispatch", cmd)
-                    if (!res.isSuccess) {
-                        val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
-                        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-                        audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-                    }
-                } catch (ignored: Throwable) {
-                    val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
-                    audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-                    audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-                }
-            }
-        } else {
+    private suspend fun sendMediaCommandSync(play: Boolean) {
+        val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
+        if (ShizukuManager.hasShizukuPermission()) {
             try {
-                val keyCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
-                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+                val cmd = if (play) "play" else "pause"
+                val res = ShizukuManager.execCommand("cmd", "media_session", "dispatch", cmd)
+                if (res.isSuccess) return
             } catch (ignored: Throwable) {}
         }
+        try {
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        } catch (ignored: Throwable) {}
     }
 
-    private suspend fun checkHasMediaSession(): Boolean = withContext(Dispatchers.IO) {
-        if (!ShizukuManager.hasShizukuPermission()) return@withContext false
+    /**
+     * Checks `dumpsys media_session` for an active, non-system media session with
+     * non-empty metadata that is currently in PAUSED (`paused = true`) or PLAYING
+     * (`paused = false`) state.
+     */
+    private suspend fun hasActiveSessionInState(paused: Boolean): Boolean {
+        if (!ShizukuManager.hasShizukuPermission()) return false
         try {
-            val res = ShizukuManager.execCommand("cmd", "media_session", "list-sessions")
-            if (res.isSuccess && res.output.isNotBlank()) {
-                val validLines = res.output.lines().filter { line ->
-                    line.isNotBlank() &&
-                    !line.startsWith("Sessions:") &&
-                    !line.contains("com.android.bluetooth")
-                }
-                if (validLines.isNotEmpty()) return@withContext true
-            }
-
             val dumpRes = ShizukuManager.execCommand("dumpsys", "media_session")
-            if (dumpRes.isSuccess && dumpRes.output.isNotBlank()) {
-                val out = dumpRes.output
-                val hasSession = !out.contains("Media button session is null")
-                val hasActive = out.lines().any { it.contains("active=true") && !it.contains("com.android.bluetooth") }
-                val hasPlayingOrPaused = out.contains("state=2") || out.contains("state=3")
-                if (hasSession || hasActive || hasPlayingOrPaused) {
-                    return@withContext true
+            if (!dumpRes.isSuccess || dumpRes.output.isBlank()) return false
+
+            val blocks = dumpRes.output.split("ownerPid=")
+            for (i in 1 until blocks.size) {
+                val block = blocks[i]
+                if (block.contains("package=com.android.bluetooth") ||
+                    block.contains("package=com.android.systemui") ||
+                    block.contains("package=com.android.server.telecom")
+                ) {
+                    continue
                 }
+                val isActive = block.contains("active=true")
+                if (!isActive) continue
+
+                val hasMetadata = block.contains("metadata:") &&
+                    !block.contains("metadata: null") &&
+                    !block.contains("metadata: size=0")
+                if (!hasMetadata) continue
+
+                val matchesState = if (paused) {
+                    block.contains("PlaybackState {state=2,") ||
+                        block.contains("PlaybackState {state=PAUSED(2)")
+                } else {
+                    block.contains("PlaybackState {state=3,") ||
+                        block.contains("PlaybackState {state=PLAYING(3)")
+                }
+                if (matchesState) return true
             }
         } catch (ignored: Throwable) {}
-        false
+        return false
     }
 
     private fun changeBrightness(delta: Int) {
@@ -2587,7 +3378,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     // GamepadListener Callbacks
     override fun onNavLeft() {
-        if (isTransitioningMode) return
+        if (isTransitioningMode || isBluetoothMenuOpen) return
         if (currentMode == OverlayMode.APP_SWITCHER) {
             moveSelection(-1)
         } else {
@@ -2596,7 +3387,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavRight() {
-        if (isTransitioningMode) return
+        if (isTransitioningMode || isBluetoothMenuOpen) return
         if (currentMode == OverlayMode.APP_SWITCHER) {
             moveSelection(1)
         } else {
@@ -2606,6 +3397,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavUp() {
         if (isTransitioningMode || killInFlight) return
+        if (isBluetoothMenuOpen) {
+            moveBluetoothSelection(-1)
+            return
+        }
         val nextMode = if (currentMode == OverlayMode.APP_SWITCHER) {
             OverlayMode.CONTROL_CENTER
         } else {
@@ -2616,6 +3411,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavDown() {
         if (isTransitioningMode || killInFlight) return
+        if (isBluetoothMenuOpen) {
+            moveBluetoothSelection(1)
+            return
+        }
         val nextMode = if (currentMode == OverlayMode.APP_SWITCHER) {
             OverlayMode.CONTROL_CENTER
         } else {
@@ -2626,6 +3425,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavStart() {
         if (isTransitioningMode || killInFlight) return
+        if (isBluetoothMenuOpen) {
+            if (bluetoothDeviceAdapter.itemCount > 0 && bluetoothDeviceAdapter.selectedPosition != 0) {
+                triggerHaptic()
+                bluetoothDeviceAdapter.selectedPosition = 0
+                binding.rvBluetoothDevices.scrollToPosition(0)
+            }
+            return
+        }
         if (currentMode == OverlayMode.APP_SWITCHER) {
             if (tasks.isEmpty()) return
             val current = pendingTarget ?: taskAdapter.selectedPosition
@@ -2643,6 +3450,15 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavEnd() {
         if (isTransitioningMode || killInFlight) return
+        if (isBluetoothMenuOpen) {
+            val end = bluetoothDeviceAdapter.itemCount - 1
+            if (end >= 0 && bluetoothDeviceAdapter.selectedPosition != end) {
+                triggerHaptic()
+                bluetoothDeviceAdapter.selectedPosition = end
+                binding.rvBluetoothDevices.scrollToPosition(end)
+            }
+            return
+        }
         if (currentMode == OverlayMode.APP_SWITCHER) {
             if (tasks.isEmpty()) return
             val end = tasks.size - 1
@@ -2678,22 +3494,36 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onButtonSelect() {
         if (isTransitioningMode) return
+        if (isBluetoothMenuOpen) {
+            handleSelectedBluetoothDeviceAction()
+            return
+        }
         if (currentMode == OverlayMode.APP_SWITCHER) {
             switchSelectedTask()
         } else {
-            toggleSelectedControlCard()
+            openSelectedControlMenu()
         }
     }
 
     override fun onButtonBack() {
         if (killInFlight || isTransitioningMode) return
+        if (isBluetoothMenuOpen) {
+            closeBluetoothMenu()
+            return
+        }
         dismissSwitcher()
     }
 
     override fun onButtonAction() {
         if (isTransitioningMode) return
+        if (isBluetoothMenuOpen) {
+            toggleBluetoothFromModal()
+            return
+        }
         if (currentMode == OverlayMode.APP_SWITCHER) {
             killSelectedTask()
+        } else {
+            toggleSelectedControlCard()
         }
     }
 

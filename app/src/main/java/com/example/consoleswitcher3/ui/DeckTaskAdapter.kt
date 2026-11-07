@@ -166,25 +166,11 @@ class DeckTaskAdapter(
             // App preview snapshot, with app-icon fallback when the system
             // hasn't cached a snapshot yet (e.g. the task that was foreground
             // when the overlay opened).
-            ivTaskPreview.setBackgroundColor(
-                com.example.consoleswitcher3.prefs.OverlayPrefs.getPreviewBg(itemView.context)
-            )
+            ivTaskPreview.background = null
             val density = itemView.resources.displayMetrics.density
             val radius = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(itemView.context) * density
             cardContainer?.radius = radius
-
-            val standardBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardBg(itemView.context)
-            val focusedBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardFocusedBg(itemView.context)
-            // Keep the CardView shell in sync with the fill so corners match.
-            cardContainer?.setCardBackgroundColor(
-                if (task.isCurrentTask) {
-                    standardBg
-                } else if (isSelected) {
-                    focusedBg
-                } else {
-                    standardBg
-                }
-            )
+            cardContainer?.setCardBackgroundColor(android.graphics.Color.TRANSPARENT)
             bindPreviewOnly(task)
 
             // Force the focus visuals to refresh for this (possibly recycled) row.
@@ -250,23 +236,19 @@ class DeckTaskAdapter(
             lastFocused = isFocused
             updateArrowColor(isFocused)
             val context = itemView.context
-            val radius = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(context) * context.resources.displayMetrics.density
+            val density = context.resources.displayMetrics.density
+            val radius = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(context) * density
             cardContainer?.radius = radius
+            cardContainer?.setCardBackgroundColor(android.graphics.Color.TRANSPARENT)
 
-            val standardBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardBg(context)
-            val focusedBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardFocusedBg(context)
-            // Ensure CardView shell background matches currentTask or focus state
-            if (currentTask?.isCurrentTask == true) {
-                cardContainer?.setCardBackgroundColor(standardBg)
+            // Solution A: Combine fill & stroke in a single GradientDrawable so corners never bleed
+            val isCurrent = currentTask?.isCurrentTask == true
+            cardInnerLayout?.background = getCombinedDrawable(isFocused)
+            if (isCurrent) {
+                borderOverlay?.background = null
             } else {
-                cardContainer?.setCardBackgroundColor(if (isFocused) focusedBg else standardBg)
+                borderOverlay?.background = getStrokeDrawable(isFocused)
             }
-            // Fill behind the preview (visible in icon-fallback mode).
-            cardInnerLayout?.background = getFillDrawable(isFocused)
-            // Stroke overlay ON TOP of the preview — the old background-based
-            // border was hidden behind opaque snapshots (background draws
-            // behind children), which is why the setting appeared to do nothing.
-            borderOverlay?.background = getStrokeDrawable(isFocused)
 
             // App icon + title under the card: smoothly fade in when focused, fade out when unfocused.
             // INVISIBLE keeps the row's height reserved so toggling never
@@ -309,47 +291,59 @@ class DeckTaskAdapter(
         private var cachedCardBorder: Int = Int.MIN_VALUE
         private var cachedCardBgForStroke: Int = Int.MIN_VALUE
         private var cachedFocusedBgForStroke: Int = Int.MIN_VALUE
-        private var cachedFillFocusedColor: Int = Int.MIN_VALUE
-        private var cachedFillNormalColor: Int = Int.MIN_VALUE
         private var cachedCornerRadiusDp: Float = Float.MIN_VALUE
         private var cachedStrokeFocused: android.graphics.drawable.GradientDrawable? = null
         private var cachedStrokeNormal: android.graphics.drawable.GradientDrawable? = null
-        private var cachedFillFocused: android.graphics.drawable.GradientDrawable? = null
-        private var cachedFillNormal: android.graphics.drawable.GradientDrawable? = null
-        private var cachedFillCurrentTask: android.graphics.drawable.GradientDrawable? = null
+        private var cachedCombinedFocused: android.graphics.drawable.GradientDrawable? = null
+        private var cachedCombinedNormal: android.graphics.drawable.GradientDrawable? = null
+        private var cachedCombinedCurrentTask: android.graphics.drawable.GradientDrawable? = null
 
-        private fun getFillDrawable(isFocused: Boolean): android.graphics.drawable.Drawable {
+        private fun getCombinedDrawable(isFocused: Boolean): android.graphics.drawable.Drawable {
             val context = itemView.context
-            val radius = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(context)
+            val borderColor = com.example.consoleswitcher3.prefs.OverlayPrefs.getBorderColor(context)
+            val borderWidthDp = com.example.consoleswitcher3.prefs.OverlayPrefs.getBorderWidthDp(context)
+            val cardBorder = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardBorder(context)
             val cardBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardBg(context)
             val focusedBg = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardFocusedBg(context)
-            if (radius != cachedCornerRadiusDp) {
+            val radius = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(context)
+            if (borderColor != cachedBorderColor || borderWidthDp != cachedBorderWidthDp ||
+                cardBorder != cachedCardBorder || cardBg != cachedCardBgForStroke ||
+                focusedBg != cachedFocusedBgForStroke || radius != cachedCornerRadiusDp
+            ) {
+                cachedBorderColor = borderColor
+                cachedBorderWidthDp = borderWidthDp
+                cachedCardBorder = cardBorder
+                cachedCardBgForStroke = cardBg
+                cachedFocusedBgForStroke = focusedBg
                 cachedCornerRadiusDp = radius
-                cachedFillFocused = null
-                cachedFillNormal = null
-                cachedFillCurrentTask = null
                 cachedStrokeFocused = null
                 cachedStrokeNormal = null
+                cachedCombinedFocused = null
+                cachedCombinedNormal = null
+                cachedCombinedCurrentTask = null
             }
             if (currentTask?.isCurrentTask == true) {
-                if (cachedFillCurrentTask == null || cardBg != cachedFillNormalColor) {
-                    cachedFillNormalColor = cardBg
-                    cachedFillCurrentTask = buildFillDrawable(cardBg)
+                if (cachedCombinedCurrentTask == null) {
+                    cachedCombinedCurrentTask = buildCombinedDrawable(
+                        fillColor = cardBg,
+                        strokeColor = if (isFocused) borderColor else cardBorder,
+                        strokeWidthDp = borderWidthDp
+                    )
                 }
-                return cachedFillCurrentTask!!
+                return cachedCombinedCurrentTask!!
             }
             return if (isFocused) {
-                if (cachedFillFocused == null || focusedBg != cachedFillFocusedColor) {
-                    cachedFillFocusedColor = focusedBg
-                    cachedFillFocused = buildFillDrawable(focusedBg)
-                }
-                cachedFillFocused!!
+                cachedCombinedFocused ?: buildCombinedDrawable(
+                    fillColor = focusedBg,
+                    strokeColor = borderColor,
+                    strokeWidthDp = borderWidthDp
+                ).also { cachedCombinedFocused = it }
             } else {
-                if (cachedFillNormal == null || cardBg != cachedFillNormalColor) {
-                    cachedFillNormalColor = cardBg
-                    cachedFillNormal = buildFillDrawable(cardBg)
-                }
-                cachedFillNormal!!
+                cachedCombinedNormal ?: buildCombinedDrawable(
+                    fillColor = cardBg,
+                    strokeColor = cardBorder,
+                    strokeWidthDp = borderWidthDp
+                ).also { cachedCombinedNormal = it }
             }
         }
 
@@ -373,8 +367,9 @@ class DeckTaskAdapter(
                 cachedCornerRadiusDp = radius
                 cachedStrokeFocused = null
                 cachedStrokeNormal = null
-                cachedFillFocused = null
-                cachedFillNormal = null
+                cachedCombinedFocused = null
+                cachedCombinedNormal = null
+                cachedCombinedCurrentTask = null
             }
             return if (isFocused) {
                 cachedStrokeFocused ?: buildStrokeDrawable(
@@ -389,13 +384,17 @@ class DeckTaskAdapter(
             }
         }
 
-        private fun buildFillDrawable(fillColor: Int): android.graphics.drawable.GradientDrawable {
+        private fun buildCombinedDrawable(fillColor: Int, strokeColor: Int, strokeWidthDp: Float): android.graphics.drawable.GradientDrawable {
             val density = itemView.resources.displayMetrics.density
             val radiusDp = com.example.consoleswitcher3.prefs.OverlayPrefs.getCardCornerRadiusDp(itemView.context)
             return android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                 cornerRadius = radiusDp * density
                 setColor(fillColor)
+                val strokePx = (strokeWidthDp * density).toInt().coerceAtLeast(0)
+                if (strokePx > 0) {
+                    setStroke(strokePx, strokeColor)
+                }
             }
         }
 

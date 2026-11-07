@@ -101,7 +101,7 @@ class DeckControlAdapter(
         const val PAYLOAD_STATE_CHANGE = "state_change"
     }
 
-    class ControlViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+    inner class ControlViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val cardContainer: CardView? = itemView.findViewById(R.id.cardContainer)
         val cardInnerLayout: View? = itemView.findViewById(R.id.cardInnerLayout)
         val borderOverlay: View? = itemView.findViewById(R.id.vBorder)
@@ -141,12 +141,26 @@ class DeckControlAdapter(
 
             val context = itemView.context
             val standardBg = OverlayPrefs.getCardBg(context)
-            cardContainer?.setCardBackgroundColor(standardBg)
             val radius = OverlayPrefs.getCardCornerRadiusDp(context) * context.resources.displayMetrics.density
             cardContainer?.radius = radius
+            cardContainer?.setCardBackgroundColor(android.graphics.Color.TRANSPARENT)
 
-            cardInnerLayout?.background = getFillDrawable()
-            borderOverlay?.background = getStrokeDrawable(isFocused)
+            val borderColor = OverlayPrefs.getBorderColor(context)
+            val borderWidthDp = OverlayPrefs.getBorderWidthDp(context)
+            val cardBorder = OverlayPrefs.getCardBorder(context)
+            val strokeWidthPx = (borderWidthDp * context.resources.displayMetrics.density).toInt().coerceAtLeast(0)
+
+            // Solution A: Combine fill & stroke in a single GradientDrawable so corners never bleed
+            val combinedDrawable = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = radius
+                setColor(standardBg)
+                if (strokeWidthPx > 0) {
+                    setStroke(strokeWidthPx, if (isFocused) borderColor else cardBorder)
+                }
+            }
+            cardInnerLayout?.background = combinedDrawable
+            borderOverlay?.background = null
 
             labelRow?.animate()?.cancel()
             if (isFocused) {
@@ -179,37 +193,6 @@ class DeckControlAdapter(
                     labelRow?.visibility = View.INVISIBLE
                 }
             }
-        }
-
-        private fun getFillDrawable(): android.graphics.drawable.Drawable {
-            val context = itemView.context
-            val fill = OverlayPrefs.getCardBg(context)
-            val radius = OverlayPrefs.getCardCornerRadiusDp(context) * context.resources.displayMetrics.density
-            val d = GradientDrawable()
-            d.shape = GradientDrawable.RECTANGLE
-            d.setColor(fill)
-            d.cornerRadius = radius
-            return d
-        }
-
-        private fun getStrokeDrawable(isFocused: Boolean): android.graphics.drawable.Drawable {
-            val context = itemView.context
-            val borderColor = OverlayPrefs.getBorderColor(context)
-            val borderWidthDp = OverlayPrefs.getBorderWidthDp(context)
-            val cardBorder = OverlayPrefs.getCardBorder(context)
-            val density = context.resources.displayMetrics.density
-            val radius = OverlayPrefs.getCardCornerRadiusDp(context) * density
-
-            val d = GradientDrawable()
-            d.shape = GradientDrawable.RECTANGLE
-            d.setColor(android.graphics.Color.TRANSPARENT)
-            d.cornerRadius = radius
-            val strokeWidthPx = (borderWidthDp * density).toInt().coerceAtLeast(0)
-
-            if (strokeWidthPx > 0) {
-                d.setStroke(strokeWidthPx, if (isFocused) borderColor else cardBorder)
-            }
-            return d
         }
     }
 }
