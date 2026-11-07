@@ -80,6 +80,12 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         CONTROL_CENTER
     }
 
+    private enum class ActiveControlModal {
+        NONE,
+        BLUETOOTH,
+        WIFI
+    }
+
     private lateinit var binding: ActivityOverlayBinding
     private lateinit var gamepadHelper: GamepadInputHelper
     private lateinit var taskAdapter: DeckTaskAdapter
@@ -91,9 +97,29 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private var currentMode: OverlayMode = OverlayMode.APP_SWITCHER
     private var isTransitioningMode: Boolean = false
-    private var isBluetoothMenuOpen: Boolean = false
+    private var activeControlModal: ActiveControlModal = ActiveControlModal.NONE
+    private val isControlModalOpen: Boolean
+        get() = activeControlModal != ActiveControlModal.NONE
+    private val isBluetoothMenuOpen: Boolean
+        get() = activeControlModal == ActiveControlModal.BLUETOOTH
+    private val isWifiMenuOpen: Boolean
+        get() = activeControlModal == ActiveControlModal.WIFI
+
     private val busyBluetoothAddresses = mutableMapOf<String, String>()
+    private val busyBluetoothTimestamps = mutableMapOf<String, Long>()
+    private val errorBluetoothAddresses = mutableSetOf<String>()
     private val bluetoothProfiles = mutableMapOf<Int, BluetoothProfile>()
+
+    private data class SavedWifiEntry(
+        val networkId: Int,
+        val ssid: String
+    )
+    private val busyWifiNetworks = mutableMapOf<String, String>()
+    private val errorWifiNetworks = mutableSetOf<String>()
+    private var cachedShellWifiNetworks: List<SavedWifiEntry> = emptyList()
+    private var cachedShellConnectedSsid: String? = null
+    private var cachedShellConnectedNetId: Int = -1
+    private var isRefreshingShellWifi: Boolean = false
 
     /** Target of the in-flight programmatic scroll, if any. While set,
      *  navigation chains off it (not the last committed position) so rapid
@@ -185,6 +211,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         private const val REQUEST_CODE_BLUETOOTH_PERMS = 2002
         private const val PROFILE_HID_HOST = 4 // BluetoothProfile.HID_HOST / INPUT_DEVICE
         private const val ACTION_BLUETOOTH_SETTINGS = "__bluetooth_settings__"
+        private const val ACTION_WIFI_SETTINGS = "__wifi_settings__"
     }
 
     private data class PendingToggle(
@@ -194,6 +221,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private val pendingToggleStates = mutableMapOf<String, PendingToggle>()
 
     private val controlCenterReceiver = object : BroadcastReceiver() {
+        @Suppress("DEPRECATION")
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 WifiManager.WIFI_STATE_CHANGED_ACTION -> {
@@ -206,7 +234,33 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                             pendingToggleStates.remove("wifi")
                         }
                     }
+                    if (state == WifiManager.WIFI_STATE_DISABLED) {
+                        busyWifiNetworks.clear()
+                        errorWifiNetworks.clear()
+                    }
                     refreshControlCards()
+                    if (isWifiMenuOpen) {
+                        refreshWifiMenuUi()
+                    }
+                }
+                WifiManager.NETWORK_STATE_CHANGED_ACTION,
+                WifiManager.SUPPLICANT_STATE_CHANGED_ACTION -> {
+                    if (intent.action == WifiManager.SUPPLICANT_STATE_CHANGED_ACTION) {
+                        val supplicantError = intent.getIntExtra(WifiManager.EXTRA_SUPPLICANT_ERROR, -1)
+                        if (supplicantError != -1) {
+                            val iter = busyWifiNetworks.entries.iterator()
+                            while (iter.hasNext()) {
+                                val entry = iter.next()
+                                if (entry.value == "Connecting...") {
+                                    errorWifiNetworks.add(entry.key)
+                                    iter.remove()
+                                }
+                            }
+                        }
+                    }
+                    if (isWifiMenuOpen) {
+                        refreshWifiMenuUi()
+                    }
                 }
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
@@ -222,6 +276,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         initBluetoothProfiles()
                     } else if (state == BluetoothAdapter.STATE_OFF) {
                         busyBluetoothAddresses.clear()
+                        busyBluetoothTimestamps.clear()
+                        errorBluetoothAddresses.clear()
                     }
                     refreshControlCards()
                     if (isBluetoothMenuOpen) {
@@ -251,23 +307,42 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         when (state) {
                             BluetoothProfile.STATE_CONNECTED -> {
                                 busyBluetoothAddresses.remove(addr)
+                                busyBluetoothTimestamps.remove(addr)
+                                errorBluetoothAddresses.remove(addr)
                             }
                             BluetoothProfile.STATE_DISCONNECTED -> {
                                 if (!isDeviceConnected(device) && !isDeviceConnecting(device)) {
-                                    busyBluetoothAddresses.remove(addr)
+                                    val wasConnecting = busyBluetoothAddresses[addr] == "Connecting..."
+                                    val startedAt = busyBluetoothTimestamps[addr] ?: 0L
+                                    if (!wasConnecting || SystemClock.uptimeMillis() - startedAt > 1200L) {
+                                        if (wasConnecting) {
+                                            errorBluetoothAddresses.add(addr)
+                                        }
+                                        busyBluetoothAddresses.remove(addr)
+                                        busyBluetoothTimestamps.remove(addr)
+                                    }
                                 }
                             }
                             BluetoothProfile.STATE_CONNECTING -> {
                                 if (busyBluetoothAddresses[addr] != "Disconnecting...") {
                                     busyBluetoothAddresses[addr] = "Connecting..."
+                                    errorBluetoothAddresses.remove(addr)
+                                    if (!busyBluetoothTimestamps.containsKey(addr)) {
+                                        busyBluetoothTimestamps[addr] = SystemClock.uptimeMillis()
+                                    }
                                 }
                             }
                             BluetoothProfile.STATE_DISCONNECTING -> {
                                 busyBluetoothAddresses[addr] = "Disconnecting..."
+                                busyBluetoothTimestamps[addr] = SystemClock.uptimeMillis()
                             }
                         }
                         if (intent.action == BluetoothDevice.ACTION_ACL_DISCONNECTED) {
+                            if (busyBluetoothAddresses[addr] == "Connecting...") {
+                                errorBluetoothAddresses.add(addr)
+                            }
                             busyBluetoothAddresses.remove(addr)
+                            busyBluetoothTimestamps.remove(addr)
                         }
                     }
                     if (isBluetoothMenuOpen) {
@@ -1254,9 +1329,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         animateCardPress(position)
 
         when (currentCard.id) {
+            "wifi" -> openWifiPanel()
             "bluetooth" -> openBluetoothPanel()
             else -> {
-                // Wi-Fi and other control menus to be implemented later
+                // Other control menus
             }
         }
     }
@@ -1314,6 +1390,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             ?.start()
     }
 
+    private fun openWifiPanel() {
+        openWifiMenu()
+    }
+
     private fun openBluetoothPanel() {
         openBluetoothMenu()
     }
@@ -1327,13 +1407,17 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             items = emptyList(),
             onItemClick = { _, item ->
                 triggerHaptic()
-                handleBluetoothDeviceItemAction(item)
+                if (isWifiMenuOpen) {
+                    handleWifiNetworkItemAction(item)
+                } else {
+                    handleBluetoothDeviceItemAction(item)
+                }
             }
         )
         binding.rvBluetoothDevices.adapter = bluetoothDeviceAdapter
 
         binding.bluetoothMenuOverlay.setOnClickListener {
-            closeBluetoothMenu()
+            closeControlModal()
         }
         binding.cardBluetoothModal.setOnClickListener {
             // Consume clicks inside the modal card so it doesn't close
@@ -1470,13 +1554,30 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private fun openBluetoothMenu() {
         if (isBluetoothMenuOpen) return
-        isBluetoothMenuOpen = true
+        activeControlModal = ActiveControlModal.BLUETOOTH
+        errorBluetoothAddresses.clear()
 
         applyBluetoothModalStyling()
         ensureBluetoothPermissions()
         initBluetoothProfiles()
+        bluetoothDeviceAdapter.selectedPosition = 0
         refreshBluetoothMenuUi()
+        animateOpenControlModal()
+    }
 
+    private fun openWifiMenu() {
+        if (isWifiMenuOpen) return
+        activeControlModal = ActiveControlModal.WIFI
+        errorWifiNetworks.clear()
+
+        applyBluetoothModalStyling()
+        ensureWifiPermissions()
+        bluetoothDeviceAdapter.selectedPosition = 0
+        refreshWifiMenuUi()
+        animateOpenControlModal()
+    }
+
+    private fun animateOpenControlModal() {
         val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
         val closeSpeed = prefs.getCloseAnimSpeed(this)
         val isOff = prefs.isCloseAnimOff(closeSpeed)
@@ -1521,8 +1622,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun closeBluetoothMenu() {
-        if (!isBluetoothMenuOpen) return
-        isBluetoothMenuOpen = false
+        closeControlModal()
+    }
+
+    private fun closeControlModal() {
+        if (!isControlModalOpen) return
+        activeControlModal = ActiveControlModal.NONE
+        errorBluetoothAddresses.clear()
+        errorWifiNetworks.clear()
         triggerHaptic()
 
         val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
@@ -1549,7 +1656,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             .setDuration(duration)
             .setInterpolator(AccelerateInterpolator(1.4f))
             .withEndAction {
-                if (!isBluetoothMenuOpen) {
+                if (!isControlModalOpen) {
                     binding.bluetoothMenuOverlay.visibility = View.GONE
                     binding.bluetoothMenuOverlay.alpha = 1f
                 }
@@ -1584,13 +1691,20 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
     }
 
-    private fun isDeviceConnected(device: BluetoothDevice): Boolean {
-        try {
-            val method = BluetoothDevice::class.java.getMethod("isConnected")
-            val connected = method.invoke(device) as? Boolean
-            if (connected == true) return true
-        } catch (ignored: Throwable) {}
+    private fun toggleWifiFromModal() {
+        val wifiIdx = controlCards.indexOfFirst { it.id == "wifi" }
+        if (wifiIdx >= 0) {
+            toggleControlCardAt(wifiIdx)
+            binding.rvBluetoothDevices.postDelayed({
+                if (!isFinishing && !isDestroyed && isWifiMenuOpen) {
+                    refreshWifiMenuUi()
+                }
+            }, 150L)
+            refreshWifiMenuUi()
+        }
+    }
 
+    private fun isDeviceProfileConnected(device: BluetoothDevice): Boolean {
         for (proxy in bluetoothProfiles.values) {
             try {
                 @Suppress("MissingPermission")
@@ -1600,6 +1714,27 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             } catch (ignored: Throwable) {}
         }
         return false
+    }
+
+    private fun isDeviceConnected(device: BluetoothDevice): Boolean {
+        // If any high-level profile is still actively in STATE_CONNECTING, do not report connected yet
+        if (isDeviceConnecting(device)) return false
+
+        // High-level profile connection is the authoritative signal for controllers/headsets
+        if (isDeviceProfileConnected(device)) return true
+
+        val addr = device.address
+        if (addr != null && busyBluetoothAddresses[addr] == "Connecting...") {
+            val startedAt = busyBluetoothTimestamps[addr] ?: 0L
+            // Low-level radio ACL link comes up ~200-400ms after initiating connection, before
+            // high-level profiles finish handshaking. Wait up to 2.5s for a profile to report
+            // STATE_CONNECTED before accepting an ACL-only connection (for BLE/non-profile devices).
+            if (bluetoothProfiles.isNotEmpty() && SystemClock.uptimeMillis() - startedAt < 2500L) {
+                return false
+            }
+        }
+
+        return isDeviceAclConnected(device)
     }
 
     private fun isDeviceConnecting(device: BluetoothDevice): Boolean {
@@ -1685,6 +1820,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 val isConnecting = (busyText != null && !isDisconnecting) || (!connected && isDeviceConnecting(device))
                 val isBusy = if (connected) isDisconnecting else isConnecting
                 val isCleanConnected = connected && !isDisconnecting
+                if (isCleanConnected) {
+                    errorBluetoothAddresses.remove(addr)
+                }
+                val hasError = !isCleanConnected && !isBusy && errorBluetoothAddresses.contains(addr)
 
                 val statusText = when {
                     isBusy -> (busyText ?: if (isDisconnecting) "Disconnecting..." else "Connecting...")
@@ -1697,6 +1836,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         name = name,
                         isConnected = isCleanConnected,
                         isBusy = isBusy,
+                        hasError = hasError,
                         statusText = statusText,
                         iconRes = getBluetoothDeviceIcon(device),
                         device = device,
@@ -1807,11 +1947,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private fun triggerBluetoothDeviceConnection(device: BluetoothDevice, connect: Boolean) {
         val addr = device.address ?: return
+        errorBluetoothAddresses.remove(addr)
         busyBluetoothAddresses[addr] = if (connect) "Connecting..." else "Disconnecting..."
+        busyBluetoothTimestamps[addr] = SystemClock.uptimeMillis()
         refreshBluetoothMenuUi()
 
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
+            val initiated = withContext(Dispatchers.IO) {
                 connectOrDisconnectBluetoothDevice(device, connect)
             }
 
@@ -1820,6 +1962,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             while (SystemClock.uptimeMillis() - startTime < maxWaitMs) {
                 delay(400L)
                 if (isFinishing || isDestroyed) break
+                if (!busyBluetoothAddresses.containsKey(addr)) return@launch
 
                 val nowConnected = isDeviceConnected(device)
                 val nowConnecting = isDeviceConnecting(device)
@@ -1827,24 +1970,32 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 if (connect) {
                     if (nowConnected) {
                         busyBluetoothAddresses.remove(addr)
+                        busyBluetoothTimestamps.remove(addr)
+                        errorBluetoothAddresses.remove(addr)
                         if (isBluetoothMenuOpen) refreshBluetoothMenuUi()
                         return@launch
                     }
                     val elapsed = SystemClock.uptimeMillis() - startTime
-                    // If after 5s neither profiles nor ACL link is active, connection attempt failed
-                    if (elapsed > 5000L && !nowConnecting && !nowConnected && !isDeviceAclConnected(device)) {
+                    // If after 5s (or 2s when invocation returned false) neither profiles nor ACL link is active, connection attempt failed
+                    val failThreshold = if (initiated) 5000L else 2000L
+                    if (elapsed > failThreshold && !nowConnecting && !nowConnected && !isDeviceAclConnected(device)) {
                         break
                     }
                 } else {
                     if (!nowConnected) {
                         busyBluetoothAddresses.remove(addr)
+                        busyBluetoothTimestamps.remove(addr)
                         if (isBluetoothMenuOpen) refreshBluetoothMenuUi()
                         return@launch
                     }
                 }
             }
 
+            if (connect && busyBluetoothAddresses[addr] == "Connecting..." && isBluetoothEnabled() && !isDeviceConnected(device)) {
+                errorBluetoothAddresses.add(addr)
+            }
             busyBluetoothAddresses.remove(addr)
+            busyBluetoothTimestamps.remove(addr)
             if (!isFinishing && !isDestroyed && isBluetoothMenuOpen) {
                 refreshBluetoothMenuUi()
             }
@@ -1964,6 +2115,637 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 } catch (ignored: Throwable) {}
             }
         }
+    }
+
+    private fun ensureWifiPermissions() {
+        val hasFine = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasFine) return
+
+        if (ShizukuManager.hasShizukuPermission()) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    ShizukuManager.execCommand("pm", "grant", packageName, Manifest.permission.ACCESS_COARSE_LOCATION)
+                    ShizukuManager.execCommand("pm", "grant", packageName, Manifest.permission.ACCESS_FINE_LOCATION)
+                } catch (ignored: Throwable) {}
+                withContext(Dispatchers.Main) {
+                    if (isWifiMenuOpen) {
+                        refreshWifiMenuUi()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stripSsidQuotes(raw: String?): String {
+        if (raw == null) return ""
+        val trimmed = raw.trim()
+        if (trimmed.equals("<unknown ssid>", ignoreCase = true) || trimmed == "0x") return ""
+        return if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            trimmed.substring(1, trimmed.length - 1)
+        } else {
+            trimmed
+        }
+    }
+
+    private fun getPrivilegedWifiService(): Any? {
+        if (!ShizukuManager.hasShizukuPermission()) return null
+        return try {
+            val binder = ShizukuManager.getSystemServiceBinder(Context.WIFI_SERVICE) ?: return null
+            val stubClass = Class.forName("android.net.wifi.IWifiManager\$Stub")
+            val asInterface = stubClass.getMethod("asInterface", IBinder::class.java)
+            asInterface.invoke(null, binder)
+        } catch (ignored: Throwable) {
+            null
+        }
+    }
+
+    private fun extractListFromSliceOrList(obj: Any?): List<Any> {
+        if (obj == null) return emptyList()
+        if (obj is List<*>) return obj.filterNotNull()
+        return try {
+            val getListMethod = obj.javaClass.getMethod("getList")
+            val list = getListMethod.invoke(obj) as? List<*>
+            list?.filterNotNull() ?: emptyList()
+        } catch (ignored: Throwable) {
+            emptyList()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun querySavedWifiConfigsPrivileged(): List<SavedWifiEntry> {
+        val resultBySsid = linkedMapOf<String, SavedWifiEntry>()
+
+        // 1. Try privileged IWifiManager via ShizukuBinderWrapper
+        val service = getPrivilegedWifiService()
+        if (service != null) {
+            val methodNames = listOf("getPrivilegedConfiguredNetworks", "getConfiguredNetworks")
+            for (methodName in methodNames) {
+                if (resultBySsid.isNotEmpty()) break
+                for (method in service.javaClass.methods) {
+                    if (method.name != methodName) continue
+                    try {
+                        val pTypes = method.parameterTypes
+                        val args = arrayOfNulls<Any>(pTypes.size)
+                        var supported = true
+                        for (i in pTypes.indices) {
+                            val pt = pTypes[i]
+                            args[i] = when {
+                                pt == String::class.java -> "com.android.shell"
+                                pt == Bundle::class.java -> Bundle()
+                                pt == Boolean::class.javaPrimitiveType || pt == Boolean::class.javaObjectType -> false
+                                pt == Int::class.javaPrimitiveType || pt == Int::class.javaObjectType -> ShizukuManager.getShizukuUid()
+                                else -> {
+                                    supported = false
+                                    null
+                                }
+                            }
+                        }
+                        if (!supported) continue
+                        val res = method.invoke(service, *args)
+                        val configs = extractListFromSliceOrList(res)
+                        for (cfg in configs) {
+                            if (cfg is android.net.wifi.WifiConfiguration) {
+                                val ssid = stripSsidQuotes(cfg.SSID)
+                                if (ssid.isNotBlank() && cfg.networkId >= 0) {
+                                    resultBySsid[ssid] = SavedWifiEntry(cfg.networkId, ssid)
+                                }
+                            }
+                        }
+                        if (resultBySsid.isNotEmpty()) break
+                    } catch (ignored: Throwable) {}
+                }
+            }
+        }
+
+        // 2. Try standard WifiManager.configuredNetworks fallback
+        if (resultBySsid.isEmpty()) {
+            try {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                @Suppress("MissingPermission")
+                val configs = wm?.configuredNetworks ?: emptyList()
+                for (cfg in configs) {
+                    val ssid = stripSsidQuotes(cfg.SSID)
+                    if (ssid.isNotBlank() && cfg.networkId >= 0) {
+                        resultBySsid[ssid] = SavedWifiEntry(cfg.networkId, ssid)
+                    }
+                }
+            } catch (ignored: Throwable) {}
+        }
+
+        // 3. Merge cached shell `cmd wifi list-networks` entries
+        for (entry in cachedShellWifiNetworks) {
+            if (!resultBySsid.containsKey(entry.ssid)) {
+                resultBySsid[entry.ssid] = entry
+            }
+        }
+
+        return resultBySsid.values.toList()
+    }
+
+    private data class ActiveWifiStatus(
+        val networkId: Int,
+        val ssid: String,
+        val isConnected: Boolean,
+        val isConnecting: Boolean
+    )
+
+    @Suppress("DEPRECATION")
+    private fun queryActiveWifiStatus(): ActiveWifiStatus {
+        var netId = -1
+        var ssid = ""
+        var supplicantStateName = ""
+
+        // 1. Try privileged IWifiManager.getConnectionInfo via ShizukuBinderWrapper
+        val service = getPrivilegedWifiService()
+        if (service != null) {
+            for (method in service.javaClass.methods) {
+                if (method.name != "getConnectionInfo") continue
+                try {
+                    val pTypes = method.parameterTypes
+                    val args = arrayOfNulls<Any>(pTypes.size)
+                    var supported = true
+                    for (i in pTypes.indices) {
+                        val pt = pTypes[i]
+                        args[i] = when {
+                            pt == String::class.java -> "com.android.shell"
+                            pt == Bundle::class.java -> Bundle()
+                            pt == Boolean::class.javaPrimitiveType || pt == Boolean::class.javaObjectType -> false
+                            else -> {
+                                supported = false
+                                null
+                            }
+                        }
+                    }
+                    if (!supported) continue
+                    val info = method.invoke(service, *args) as? android.net.wifi.WifiInfo
+                    if (info != null) {
+                        netId = info.networkId
+                        ssid = stripSsidQuotes(info.ssid)
+                        supplicantStateName = info.supplicantState?.name ?: ""
+                        if (netId >= 0 || ssid.isNotBlank()) break
+                    }
+                } catch (ignored: Throwable) {}
+            }
+        }
+
+        // 2. Fallback to standard WifiManager.connectionInfo
+        if (netId < 0 && ssid.isBlank()) {
+            try {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val info = wm?.connectionInfo
+                if (info != null) {
+                    netId = info.networkId
+                    ssid = stripSsidQuotes(info.ssid)
+                    if (supplicantStateName.isBlank()) {
+                        supplicantStateName = info.supplicantState?.name ?: ""
+                    }
+                }
+            } catch (ignored: Throwable) {}
+        }
+
+        // 3. Fallback to cached shell status if needed
+        if (ssid.isBlank() && !cachedShellConnectedSsid.isNullOrBlank()) {
+            ssid = cachedShellConnectedSsid ?: ""
+        }
+        if (netId < 0 && cachedShellConnectedNetId >= 0) {
+            netId = cachedShellConnectedNetId
+        }
+
+        val isSupplicantConnecting = supplicantStateName in setOf(
+            "AUTHENTICATING",
+            "ASSOCIATING",
+            "ASSOCIATED",
+            "FOUR_WAY_HANDSHAKE",
+            "GROUP_HANDSHAKE"
+        )
+        val isSupplicantCompleted = supplicantStateName == "COMPLETED" ||
+            (supplicantStateName.isBlank() && (netId >= 0 || ssid.isNotBlank()))
+
+        val isConnected = (netId >= 0 || ssid.isNotBlank()) && isSupplicantCompleted && !isSupplicantConnecting
+        val isConnecting = (netId >= 0 || ssid.isNotBlank()) && isSupplicantConnecting
+
+        return ActiveWifiStatus(
+            networkId = netId,
+            ssid = ssid,
+            isConnected = isConnected,
+            isConnecting = isConnecting
+        )
+    }
+
+    private fun refreshShellWifiCacheAsync() {
+        if (isRefreshingShellWifi || !ShizukuManager.hasShizukuPermission()) return
+        isRefreshingShellWifi = true
+        lifecycleScope.launch {
+            val parsed = withContext(Dispatchers.IO) {
+                val listEntries = mutableListOf<SavedWifiEntry>()
+                var connectedSsid: String? = null
+                var connectedNetId = -1
+                try {
+                    val listRes = ShizukuManager.execCommand("cmd", "wifi", "list-networks")
+                    if (listRes.isSuccess && listRes.output.isNotBlank()) {
+                        for (rawLine in listRes.output.lines()) {
+                            val line = rawLine.trim()
+                            if (line.isEmpty() || line.startsWith("Network Id", ignoreCase = true)) continue
+                            val match = Regex("^(\\d+)\\s+(.+?)\\s{2,}.*$").find(line)
+                                ?: Regex("^(\\d+)\\s+(\\S+)\\s+.*$").find(line)
+                            if (match != null) {
+                                val id = match.groupValues[1].toIntOrNull() ?: continue
+                                val netSsid = stripSsidQuotes(match.groupValues[2].trim())
+                                if (netSsid.isNotBlank()) {
+                                    listEntries.add(SavedWifiEntry(id, netSsid))
+                                }
+                            }
+                        }
+                    }
+                    val statusRes = ShizukuManager.execCommand("cmd", "wifi", "status")
+                    if (statusRes.isSuccess && statusRes.output.isNotBlank()) {
+                        val out = statusRes.output
+                        if (out.contains("Wifi is connected to", ignoreCase = true)) {
+                            val ssidMatch = Regex("Wifi is connected to\\s+\"([^\"]+)\"").find(out)
+                            connectedSsid = ssidMatch?.groupValues?.getOrNull(1)
+                        }
+                        val netIdMatch = Regex("networkId:\\s*(\\d+)").find(out)
+                            ?: Regex("Net ID:\\s*(\\d+)").find(out)
+                        if (netIdMatch != null) {
+                            connectedNetId = netIdMatch.groupValues[1].toIntOrNull() ?: -1
+                        }
+                    }
+                } catch (ignored: Throwable) {}
+                Triple(listEntries, connectedSsid, connectedNetId)
+            }
+            isRefreshingShellWifi = false
+            cachedShellWifiNetworks = parsed.first
+            cachedShellConnectedSsid = parsed.second
+            cachedShellConnectedNetId = parsed.third
+            if (!isFinishing && !isDestroyed && isWifiMenuOpen) {
+                val items = queryWifiNetworkItems()
+                bluetoothDeviceAdapter.updateDevices(items)
+            }
+        }
+    }
+
+    private fun queryWifiNetworkItems(): List<BluetoothDeviceItem> {
+        if (!isWifiEnabled()) return emptyList()
+
+        val savedConfigs = querySavedWifiConfigsPrivileged()
+        val activeStatus = queryActiveWifiStatus()
+        val items = mutableListOf<BluetoothDeviceItem>()
+        val seenSsids = mutableSetOf<String>()
+
+        for (entry in savedConfigs) {
+            if (!seenSsids.add(entry.ssid)) continue
+            val key = "wifi:${entry.ssid}"
+            val matchesActive = (activeStatus.networkId >= 0 && activeStatus.networkId == entry.networkId) ||
+                (activeStatus.ssid.isNotBlank() && activeStatus.ssid == entry.ssid)
+
+            val busyText = busyWifiNetworks[key]
+            val isDisconnecting = busyText == "Disconnecting..."
+            val rawConnected = matchesActive && activeStatus.isConnected
+            val isConnecting = (busyText != null && !isDisconnecting && !rawConnected) ||
+                (matchesActive && activeStatus.isConnecting)
+            val isBusy = if (rawConnected) isDisconnecting else isConnecting
+            val isCleanConnected = rawConnected && !isDisconnecting
+
+            if (isCleanConnected) {
+                errorWifiNetworks.remove(key)
+                if (busyText == "Connecting...") {
+                    busyWifiNetworks.remove(key)
+                }
+            }
+            val hasError = !isCleanConnected && !isBusy && errorWifiNetworks.contains(key)
+
+            items.add(
+                BluetoothDeviceItem(
+                    address = key,
+                    name = entry.ssid,
+                    isConnected = isCleanConnected,
+                    isBusy = isBusy,
+                    hasError = hasError,
+                    statusText = "",
+                    iconRes = R.drawable.ic_wifi_rounded,
+                    device = null,
+                    networkId = entry.networkId,
+                    isSettingsAction = false
+                )
+            )
+        }
+
+        // If the currently connected network wasn't in the saved list yet, include it at the top
+        if (activeStatus.ssid.isNotBlank() && !seenSsids.contains(activeStatus.ssid)) {
+            val key = "wifi:${activeStatus.ssid}"
+            val busyText = busyWifiNetworks[key]
+            val isDisconnecting = busyText == "Disconnecting..."
+            val isCleanConnected = activeStatus.isConnected && !isDisconnecting
+            val isBusy = if (activeStatus.isConnected) isDisconnecting else (busyText != null || activeStatus.isConnecting)
+            if (isCleanConnected) {
+                errorWifiNetworks.remove(key)
+            }
+            val hasError = !isCleanConnected && !isBusy && errorWifiNetworks.contains(key)
+            items.add(
+                BluetoothDeviceItem(
+                    address = key,
+                    name = activeStatus.ssid,
+                    isConnected = isCleanConnected,
+                    isBusy = isBusy,
+                    hasError = hasError,
+                    statusText = "",
+                    iconRes = R.drawable.ic_wifi_rounded,
+                    device = null,
+                    networkId = activeStatus.networkId,
+                    isSettingsAction = false
+                )
+            )
+        }
+
+        // Sort saved networks: Connected first, then alphabetically
+        items.sortWith(
+            compareByDescending<BluetoothDeviceItem> { it.isConnected }
+                .thenBy { it.name.lowercase() }
+        )
+
+        // Append button to add new network (opens system Wi-Fi Settings) at the end of the list
+        items.add(
+            BluetoothDeviceItem(
+                address = ACTION_WIFI_SETTINGS,
+                name = "Add new network",
+                isConnected = false,
+                isBusy = false,
+                statusText = "",
+                iconRes = R.drawable.ic_add_rounded,
+                device = null,
+                networkId = -1,
+                isSettingsAction = true
+            )
+        )
+
+        return items
+    }
+
+    private fun refreshWifiMenuUi() {
+        val enabled = isWifiEnabled()
+
+        if (!enabled) {
+            bluetoothDeviceAdapter.updateDevices(emptyList())
+            binding.rvBluetoothDevices.visibility = View.INVISIBLE
+            binding.tvBluetoothEmpty.visibility = View.VISIBLE
+            binding.tvBluetoothEmpty.text = "Wi-Fi is turned off\nPress (X) to turn on"
+            return
+        }
+
+        val items = queryWifiNetworkItems()
+        bluetoothDeviceAdapter.updateDevices(items)
+
+        binding.tvBluetoothEmpty.visibility = View.GONE
+        binding.rvBluetoothDevices.visibility = View.VISIBLE
+
+        refreshShellWifiCacheAsync()
+    }
+
+    private fun handleSelectedWifiNetworkAction() {
+        if (!isWifiEnabled()) {
+            toggleWifiFromModal()
+            return
+        }
+        val selected = bluetoothDeviceAdapter.getSelectedDevice() ?: return
+        triggerHaptic()
+        handleWifiNetworkItemAction(selected)
+    }
+
+    private fun handleWifiNetworkItemAction(item: BluetoothDeviceItem) {
+        if (item.isSettingsAction) {
+            openSystemWifiSettings()
+            return
+        }
+        val targetConnect = !item.isConnected
+        triggerWifiNetworkConnection(item, targetConnect)
+    }
+
+    private fun openSystemWifiSettings() {
+        try {
+            val intent = Intent(Settings.ACTION_WIFI_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to open Wi-Fi settings: ${e.message}")
+        }
+        dismissSwitcher()
+    }
+
+    private fun triggerWifiNetworkConnection(item: BluetoothDeviceItem, connect: Boolean) {
+        val key = item.address
+        val targetSsid = item.name
+        val targetNetId = item.networkId
+
+        errorWifiNetworks.remove(key)
+        if (connect) {
+            // Clear any previous "Connecting..." states on other networks when switching
+            val iter = busyWifiNetworks.entries.iterator()
+            while (iter.hasNext()) {
+                val entry = iter.next()
+                if (entry.key != key && entry.value == "Connecting...") {
+                    iter.remove()
+                }
+            }
+            busyWifiNetworks[key] = "Connecting..."
+        } else {
+            busyWifiNetworks[key] = "Disconnecting..."
+        }
+        refreshWifiMenuUi()
+
+        lifecycleScope.launch {
+            val initiated = withContext(Dispatchers.IO) {
+                connectOrDisconnectWifiNetwork(targetNetId, targetSsid, connect)
+            }
+
+            val startTime = SystemClock.uptimeMillis()
+            val maxWaitMs = 12000L
+            while (SystemClock.uptimeMillis() - startTime < maxWaitMs) {
+                delay(400L)
+                if (isFinishing || isDestroyed) break
+                if (!busyWifiNetworks.containsKey(key)) return@launch
+
+                val status = queryActiveWifiStatus()
+                val matchesTarget = (targetNetId >= 0 && status.networkId == targetNetId) ||
+                    (targetSsid.isNotBlank() && status.ssid == targetSsid)
+
+                if (connect) {
+                    if (matchesTarget && status.isConnected) {
+                        busyWifiNetworks.remove(key)
+                        errorWifiNetworks.remove(key)
+                        cachedShellConnectedSsid = targetSsid
+                        cachedShellConnectedNetId = targetNetId
+                        if (isWifiMenuOpen) refreshWifiMenuUi()
+                        return@launch
+                    }
+                    val elapsed = SystemClock.uptimeMillis() - startTime
+                    // If connection invocation failed or after 5.5s supplicant is not connecting to target network, treat as failed
+                    val failThreshold = if (initiated) 5500L else 2000L
+                    if (elapsed > failThreshold && !matchesTarget && !status.isConnecting) {
+                        break
+                    }
+                } else {
+                    if (!matchesTarget || !status.isConnected) {
+                        busyWifiNetworks.remove(key)
+                        if (cachedShellConnectedSsid == targetSsid) {
+                            cachedShellConnectedSsid = null
+                            cachedShellConnectedNetId = -1
+                        }
+                        if (isWifiMenuOpen) refreshWifiMenuUi()
+                        return@launch
+                    }
+                }
+            }
+
+            if (connect && busyWifiNetworks[key] == "Connecting..." && isWifiEnabled()) {
+                val finalStatus = queryActiveWifiStatus()
+                val finalMatches = (targetNetId >= 0 && finalStatus.networkId == targetNetId) ||
+                    (targetSsid.isNotBlank() && finalStatus.ssid == targetSsid)
+                if (!finalMatches || !finalStatus.isConnected) {
+                    errorWifiNetworks.add(key)
+                }
+            }
+            busyWifiNetworks.remove(key)
+            if (!isFinishing && !isDestroyed && isWifiMenuOpen) {
+                refreshWifiMenuUi()
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun connectOrDisconnectWifiNetwork(networkId: Int, ssid: String, connect: Boolean): Boolean {
+        var anySucceeded = false
+        val service = getPrivilegedWifiService()
+
+        if (connect) {
+            // 1. Privileged IWifiManager.connect(...) and enableNetwork(netId, true, ...) via ShizukuBinderWrapper
+            if (service != null && networkId >= 0) {
+                for (method in service.javaClass.methods) {
+                    if (method.name == "connect") {
+                        try {
+                            val pTypes = method.parameterTypes
+                            if (pTypes.size >= 3 &&
+                                pTypes[0] == android.net.wifi.WifiConfiguration::class.java &&
+                                (pTypes[1] == Int::class.javaPrimitiveType || pTypes[1] == Int::class.javaObjectType) &&
+                                pTypes[2] == IBinder::class.java
+                            ) {
+                                val args = arrayOfNulls<Any>(pTypes.size)
+                                args[0] = null
+                                args[1] = networkId
+                                args[2] = android.os.Binder()
+                                for (i in 3 until pTypes.size) {
+                                    val pt = pTypes[i]
+                                    args[i] = when {
+                                        pt == String::class.java -> "com.android.shell"
+                                        pt == Bundle::class.java -> Bundle()
+                                        pt == Int::class.javaPrimitiveType || pt == Int::class.javaObjectType -> 0
+                                        else -> null
+                                    }
+                                }
+                                method.invoke(service, *args)
+                                anySucceeded = true
+                                break
+                            }
+                        } catch (ignored: Throwable) {}
+                    }
+                }
+
+                for (method in service.javaClass.methods) {
+                    if (method.name == "enableNetwork") {
+                        try {
+                            val pTypes = method.parameterTypes
+                            if (pTypes.size >= 2 &&
+                                (pTypes[0] == Int::class.javaPrimitiveType || pTypes[0] == Int::class.javaObjectType) &&
+                                (pTypes[1] == Boolean::class.javaPrimitiveType || pTypes[1] == Boolean::class.javaObjectType)
+                            ) {
+                                val args = arrayOfNulls<Any>(pTypes.size)
+                                args[0] = networkId
+                                args[1] = true
+                                for (i in 2 until pTypes.size) {
+                                    val pt = pTypes[i]
+                                    args[i] = when {
+                                        pt == String::class.java -> "com.android.shell"
+                                        pt == Bundle::class.java -> Bundle()
+                                        else -> null
+                                    }
+                                }
+                                val ok = method.invoke(service, *args) as? Boolean
+                                if (ok == true) anySucceeded = true
+                                break
+                            }
+                        } catch (ignored: Throwable) {}
+                    }
+                }
+
+                for (method in service.javaClass.methods) {
+                    if (method.name == "reconnect") {
+                        try {
+                            val pTypes = method.parameterTypes
+                            val args = arrayOfNulls<Any>(pTypes.size)
+                            for (i in pTypes.indices) {
+                                val pt = pTypes[i]
+                                args[i] = when {
+                                    pt == String::class.java -> "com.android.shell"
+                                    pt == Bundle::class.java -> Bundle()
+                                    else -> null
+                                }
+                            }
+                            method.invoke(service, *args)
+                            break
+                        } catch (ignored: Throwable) {}
+                    }
+                }
+            }
+
+            // 2. Fallback to standard WifiManager.enableNetwork
+            if (!anySucceeded && networkId >= 0) {
+                try {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    if (wm != null) {
+                        if (wm.enableNetwork(networkId, true)) {
+                            wm.reconnect()
+                            anySucceeded = true
+                        }
+                    }
+                } catch (ignored: Throwable) {}
+            }
+        } else {
+            // Disconnect from current network
+            if (service != null) {
+                for (method in service.javaClass.methods) {
+                    if (method.name == "disconnect") {
+                        try {
+                            val pTypes = method.parameterTypes
+                            val args = arrayOfNulls<Any>(pTypes.size)
+                            for (i in pTypes.indices) {
+                                val pt = pTypes[i]
+                                args[i] = when {
+                                    pt == String::class.java -> "com.android.shell"
+                                    pt == Bundle::class.java -> Bundle()
+                                    else -> null
+                                }
+                            }
+                            val ok = method.invoke(service, *args) as? Boolean
+                            if (ok == true) anySucceeded = true
+                            break
+                        } catch (ignored: Throwable) {}
+                    }
+                }
+            }
+            if (!anySucceeded) {
+                try {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    if (wm?.disconnect() == true) {
+                        anySucceeded = true
+                    }
+                } catch (ignored: Throwable) {}
+            }
+        }
+
+        return anySucceeded
     }
 
     private suspend fun applyControlToggle(id: String, enable: Boolean): Boolean {
@@ -3017,6 +3799,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         try {
             val controlFilter = IntentFilter().apply {
                 addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+                addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
+                @Suppress("DEPRECATION")
+                addAction(WifiManager.SUPPLICANT_STATE_CHANGED_ACTION)
                 addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
                 addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
                 addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
@@ -3059,6 +3844,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         if (isBluetoothMenuOpen) {
             applyBluetoothModalStyling()
             refreshBluetoothMenuUi()
+        } else if (isWifiMenuOpen) {
+            applyBluetoothModalStyling()
+            refreshWifiMenuUi()
         }
     }
 
@@ -3378,7 +4166,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     // GamepadListener Callbacks
     override fun onNavLeft() {
-        if (isTransitioningMode || isBluetoothMenuOpen) return
+        if (isTransitioningMode || isControlModalOpen) return
         if (currentMode == OverlayMode.APP_SWITCHER) {
             moveSelection(-1)
         } else {
@@ -3387,7 +4175,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavRight() {
-        if (isTransitioningMode || isBluetoothMenuOpen) return
+        if (isTransitioningMode || isControlModalOpen) return
         if (currentMode == OverlayMode.APP_SWITCHER) {
             moveSelection(1)
         } else {
@@ -3397,7 +4185,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavUp() {
         if (isTransitioningMode || killInFlight) return
-        if (isBluetoothMenuOpen) {
+        if (isControlModalOpen) {
             moveBluetoothSelection(-1)
             return
         }
@@ -3411,7 +4199,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavDown() {
         if (isTransitioningMode || killInFlight) return
-        if (isBluetoothMenuOpen) {
+        if (isControlModalOpen) {
             moveBluetoothSelection(1)
             return
         }
@@ -3425,7 +4213,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavStart() {
         if (isTransitioningMode || killInFlight) return
-        if (isBluetoothMenuOpen) {
+        if (isControlModalOpen) {
             if (bluetoothDeviceAdapter.itemCount > 0 && bluetoothDeviceAdapter.selectedPosition != 0) {
                 triggerHaptic()
                 bluetoothDeviceAdapter.selectedPosition = 0
@@ -3450,7 +4238,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavEnd() {
         if (isTransitioningMode || killInFlight) return
-        if (isBluetoothMenuOpen) {
+        if (isControlModalOpen) {
             val end = bluetoothDeviceAdapter.itemCount - 1
             if (end >= 0 && bluetoothDeviceAdapter.selectedPosition != end) {
                 triggerHaptic()
@@ -3498,6 +4286,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             handleSelectedBluetoothDeviceAction()
             return
         }
+        if (isWifiMenuOpen) {
+            handleSelectedWifiNetworkAction()
+            return
+        }
         if (currentMode == OverlayMode.APP_SWITCHER) {
             switchSelectedTask()
         } else {
@@ -3507,8 +4299,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onButtonBack() {
         if (killInFlight || isTransitioningMode) return
-        if (isBluetoothMenuOpen) {
-            closeBluetoothMenu()
+        if (isControlModalOpen) {
+            closeControlModal()
             return
         }
         dismissSwitcher()
@@ -3518,6 +4310,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         if (isTransitioningMode) return
         if (isBluetoothMenuOpen) {
             toggleBluetoothFromModal()
+            return
+        }
+        if (isWifiMenuOpen) {
+            toggleWifiFromModal()
             return
         }
         if (currentMode == OverlayMode.APP_SWITCHER) {

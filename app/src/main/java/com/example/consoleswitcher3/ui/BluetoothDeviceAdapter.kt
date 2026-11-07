@@ -56,6 +56,7 @@ class BluetoothDeviceAdapter(
                 return oldItem.name == newItem.name &&
                         oldItem.isConnected == newItem.isConnected &&
                         oldItem.isBusy == newItem.isBusy &&
+                        oldItem.hasError == newItem.hasError &&
                         oldItem.statusText == newItem.statusText &&
                         oldItem.iconRes == newItem.iconRes
             }
@@ -77,6 +78,8 @@ class BluetoothDeviceAdapter(
     fun getSelectedDevice(): BluetoothDeviceItem? {
         return items.getOrNull(selectedPosition)
     }
+
+    fun getItems(): List<BluetoothDeviceItem> = items
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): DeviceViewHolder {
         val view = LayoutInflater.from(parent.context)
@@ -118,18 +121,31 @@ class BluetoothDeviceAdapter(
             val primaryText = ContextCompat.getColor(context, R.color.deck_text_primary)
             ImageViewCompat.setImageTintList(ivDeviceIcon, ColorStateList.valueOf(primaryText))
             ImageViewCompat.setImageTintList(ivDeviceStatusCheck, ColorStateList.valueOf(primaryText))
-            pbDeviceLoading.indeterminateTintList = ColorStateList.valueOf(primaryText)
+            if (pbDeviceLoading.indeterminateTintList?.defaultColor != primaryText) {
+                pbDeviceLoading.indeterminateTintList = ColorStateList.valueOf(primaryText)
+            }
 
             tvDeviceName.setTextColor(primaryText)
 
             val targetBusyVisibility = if (item.isBusy) View.VISIBLE else View.GONE
-            val targetCheckVisibility = if (!item.isBusy && item.isConnected) View.VISIBLE else View.GONE
+            val showStatusIcon = !item.isBusy && (item.isConnected || item.hasError)
+            val targetStatusIconVisibility = if (showStatusIcon) View.VISIBLE else View.GONE
+
+            if (showStatusIcon) {
+                val statusIconRes = if (item.isConnected) {
+                    R.drawable.ic_check_rounded
+                } else {
+                    R.drawable.ic_error_rounded
+                }
+                ivDeviceStatusCheck.setImageResource(statusIconRes)
+                ivDeviceStatusCheck.contentDescription = if (item.isConnected) "Connected" else "Connection error"
+            }
 
             if (pbDeviceLoading.visibility != targetBusyVisibility) {
                 pbDeviceLoading.visibility = targetBusyVisibility
             }
-            if (ivDeviceStatusCheck.visibility != targetCheckVisibility) {
-                ivDeviceStatusCheck.visibility = targetCheckVisibility
+            if (ivDeviceStatusCheck.visibility != targetStatusIconVisibility) {
+                ivDeviceStatusCheck.visibility = targetStatusIconVisibility
             }
             if (tvDeviceStatus.visibility != View.GONE) {
                 tvDeviceStatus.visibility = View.GONE
