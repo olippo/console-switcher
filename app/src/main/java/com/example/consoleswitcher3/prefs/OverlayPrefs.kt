@@ -29,7 +29,7 @@ object OverlayPrefs {
         val enabled: Boolean
     )
 
-    val DEFAULT_CONTROL_ITEMS: List<String> = listOf(
+    val DEFAULT_VISIBLE_CONTROL_ITEMS: List<String> = listOf(
         "wifi",
         "bluetooth",
         "dnd",
@@ -38,6 +38,16 @@ object OverlayPrefs {
         "battery_saver",
         "night_light"
     )
+
+    val DEFAULT_HIDDEN_CONTROL_ITEMS: List<String> = listOf(
+        "airplane",
+        "screen_timeout",
+        "screenshot"
+    )
+
+    val DEFAULT_CONTROL_ITEMS: List<String> = DEFAULT_VISIBLE_CONTROL_ITEMS + DEFAULT_HIDDEN_CONTROL_ITEMS
+
+    fun isItemEnabledByDefault(id: String): Boolean = id in DEFAULT_VISIBLE_CONTROL_ITEMS
 
     /** 1.0 = default console navigation speed (matches former 0.5x). Higher = faster. */
     const val DEFAULT_NAV_SPEED = 1.0f
@@ -511,7 +521,8 @@ object OverlayPrefs {
                 .getString(KEY_CONTROL_PANEL_ITEMS, null)
             parseControlPanelItems(raw)
         } catch (ignored: Throwable) {
-            DEFAULT_CONTROL_ITEMS.map { ControlItemConfig(it, true) }
+            DEFAULT_VISIBLE_CONTROL_ITEMS.map { ControlItemConfig(it, true) } +
+                DEFAULT_HIDDEN_CONTROL_ITEMS.map { ControlItemConfig(it, false) }
         }
     }
 
@@ -526,7 +537,11 @@ object OverlayPrefs {
     }
 
     fun resetControlPanelItems(context: Context) {
-        setControlPanelItems(context, DEFAULT_CONTROL_ITEMS.map { ControlItemConfig(it, true) })
+        setControlPanelItems(
+            context,
+            DEFAULT_VISIBLE_CONTROL_ITEMS.map { ControlItemConfig(it, true) } +
+                DEFAULT_HIDDEN_CONTROL_ITEMS.map { ControlItemConfig(it, false) }
+        )
     }
 
     fun getEnabledControlPanelIds(context: Context): List<String> {
@@ -556,7 +571,12 @@ object OverlayPrefs {
 
         for (defaultId in DEFAULT_CONTROL_ITEMS) {
             if (seen.add(defaultId)) {
-                enabledList.add(ControlItemConfig(defaultId, true))
+                val defaultEnabled = isItemEnabledByDefault(defaultId)
+                if (defaultEnabled) {
+                    enabledList.add(ControlItemConfig(defaultId, true))
+                } else {
+                    disabledList.add(ControlItemConfig(defaultId, false))
+                }
             }
         }
 
@@ -579,7 +599,12 @@ object OverlayPrefs {
         }
         for (defaultId in DEFAULT_CONTROL_ITEMS) {
             if (seen.add(defaultId)) {
-                enabledList.add(ControlItemConfig(defaultId, true))
+                val defaultEnabled = isItemEnabledByDefault(defaultId)
+                if (defaultEnabled) {
+                    enabledList.add(ControlItemConfig(defaultId, true))
+                } else {
+                    disabledList.add(ControlItemConfig(defaultId, false))
+                }
             }
         }
         return (enabledList + disabledList).joinToString(",") { "${it.id}:${if (it.enabled) 1 else 0}" }
@@ -594,6 +619,9 @@ object OverlayPrefs {
             "rotation" -> "Auto-Rotate"
             "battery_saver" -> "Battery Saver"
             "night_light" -> "Night Light"
+            "airplane" -> "Airplane Mode"
+            "screen_timeout" -> "Prevent Sleep"
+            "screenshot" -> "Screenshot"
             else -> id
         }
     }
@@ -608,6 +636,9 @@ object OverlayPrefs {
             "rotation" -> R.drawable.ic_screen_rotation_rounded
             "battery_saver" -> R.drawable.ic_battery_saver_rounded
             "night_light" -> R.drawable.ic_nightlight_fill_rounded
+            "airplane" -> R.drawable.ic_airplanemode_active_rounded
+            "screen_timeout" -> R.drawable.ic_screen_timeout_rounded
+            "screenshot" -> R.drawable.ic_screenshot_rounded
             else -> R.drawable.ic_wifi_rounded
         }
     }

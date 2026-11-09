@@ -357,6 +357,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     pendingToggleStates.remove("battery_saver")
                     refreshControlCards()
                 }
+                Intent.ACTION_AIRPLANE_MODE_CHANGED -> {
+                    pendingToggleStates.remove("airplane")
+                    refreshControlCards()
+                }
             }
         }
     }
@@ -996,6 +1000,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 "rotation" -> isRotationAutoEnabled()
                 "battery_saver" -> isBatterySaverEnabled()
                 "night_light" -> isNightLightEnabled()
+                "airplane" -> isAirplaneModeEnabled()
+                "screen_timeout" -> isScreenTimeoutKeepAwake()
+                "screenshot" -> true
                 else -> false
             }
             buildControlCardForState(id, state)
@@ -1066,6 +1073,33 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 iconRes = if (enabled) R.drawable.ic_nightlight_fill_rounded else R.drawable.ic_nightlight_rounded,
                 cardIconRes = if (enabled) R.drawable.ic_nightlight_fill_rounded else R.drawable.ic_nightlight_rounded,
                 isEnabled = enabled
+            )
+            "airplane" -> ControlCard(
+                id = "airplane",
+                title = "Airplane Mode",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Radios Disabled" else "Radios Active",
+                iconRes = if (enabled) R.drawable.ic_airplanemode_active_rounded else R.drawable.ic_airplanemode_inactive_rounded,
+                cardIconRes = if (enabled) R.drawable.ic_airplanemode_active_rounded else R.drawable.ic_airplanemode_inactive_rounded,
+                isEnabled = enabled
+            )
+            "screen_timeout" -> ControlCard(
+                id = "screen_timeout",
+                title = "Prevent Sleep",
+                statusPrimary = if (enabled) "On" else "Off",
+                statusSecondary = if (enabled) "Screen Stays Awake" else "Standard Sleep Timeout",
+                iconRes = R.drawable.ic_screen_timeout_rounded,
+                cardIconRes = R.drawable.ic_screen_timeout_rounded,
+                isEnabled = enabled
+            )
+            "screenshot" -> ControlCard(
+                id = "screenshot",
+                title = "Screenshot",
+                statusPrimary = "Capture",
+                statusSecondary = "Take Screenshot",
+                iconRes = R.drawable.ic_screenshot_rounded,
+                cardIconRes = R.drawable.ic_screenshot_rounded,
+                isEnabled = true
             )
             else -> ControlCard(
                 id = id,
@@ -1309,6 +1343,59 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
     }
 
+    private fun isAirplaneModeEnabled(): Boolean {
+        val pending = pendingToggleStates["airplane"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawAirplaneModeState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("airplane")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("airplane")
+            }
+        }
+        return queryRawAirplaneModeState()
+    }
+
+    private fun queryRawAirplaneModeState(): Boolean {
+        return try {
+            Settings.Global.getInt(contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) != 0
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun isScreenTimeoutKeepAwake(): Boolean {
+        val pending = pendingToggleStates["screen_timeout"]
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pending.timestamp
+            if (elapsed < PENDING_TOGGLE_TIMEOUT_MS) {
+                val raw = queryRawScreenTimeoutState()
+                if (raw == pending.targetState) {
+                    pendingToggleStates.remove("screen_timeout")
+                    return raw
+                }
+                return pending.targetState
+            } else {
+                pendingToggleStates.remove("screen_timeout")
+            }
+        }
+        return queryRawScreenTimeoutState()
+    }
+
+    private fun queryRawScreenTimeoutState(): Boolean {
+        return try {
+            val timeout = Settings.System.getInt(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, 60000)
+            timeout >= 1800000
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun toggleSelectedControlCard() {
         if (isTransitioningMode || controlCards.isEmpty()) return
         val pos = findControlCenterPosition()
@@ -1344,6 +1431,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 animateCardPress(position)
                 openBluetoothPanel()
             }
+            "screenshot" -> {
+                triggerHaptic()
+                animateCardPress(position)
+                takeScreenshotAction()
+            }
             else -> {
                 // If it's just a toggle and not a menu, have the same function as X
                 toggleControlCardAt(position)
@@ -1354,6 +1446,12 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private fun toggleControlCardAt(position: Int) {
         if (position !in controlCards.indices) return
         val currentCard = controlCards[position]
+        if (currentCard.id == "screenshot") {
+            triggerHaptic()
+            animateCardPress(position)
+            takeScreenshotAction()
+            return
+        }
         val targetState = !currentCard.isEnabled
         triggerHaptic()
         animateCardPress(position)
@@ -2856,7 +2954,70 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 }
                 false
             }
+            "airplane" -> {
+                if (hasShizuku) {
+                    val cmdRes = ShizukuManager.execCommand("cmd", "connectivity", "airplane-mode", if (enable) "enable" else "disable")
+                    if (cmdRes.isSuccess) return true
+                    val setRes = ShizukuManager.execCommand("settings", "put", "global", "airplane_mode_on", if (enable) "1" else "0")
+                    ShizukuManager.execCommand("am", "broadcast", "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", if (enable) "true" else "false")
+                    if (setRes.isSuccess) return true
+                }
+                false
+            }
+            "screen_timeout" -> {
+                val targetTimeout = if (enable) 86400000 else 60000
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.System.canWrite(this)) {
+                    try {
+                        Settings.System.putInt(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, targetTimeout)
+                        return true
+                    } catch (ignored: Exception) {}
+                }
+                if (hasShizuku) {
+                    val res = ShizukuManager.execCommand("settings", "put", "system", "screen_off_timeout", targetTimeout.toString())
+                    ShizukuManager.execCommand("svc", "power", "stayon", if (enable) "true" else "false")
+                    if (res.isSuccess) return true
+                }
+                false
+            }
             else -> false
+        }
+    }
+
+    private fun takeScreenshotAction() {
+        dismissSwitcher()
+        val appContext = applicationContext
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            delay(250L)
+            var saved = false
+            if (ShizukuManager.hasShizukuPermission()) {
+                val dir = "/sdcard/Pictures/Screenshots"
+                val sdf = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                val filename = "Screenshot_${sdf.format(java.util.Date())}.png"
+                val fullPath = "$dir/$filename"
+                ShizukuManager.execCommand("mkdir", "-p", dir)
+                val res = ShizukuManager.execCommand("screencap", "-p", fullPath)
+                if (res.isSuccess) {
+                    saved = true
+                    ShizukuManager.execCommand("am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file://$fullPath")
+                } else {
+                    val keyRes = ShizukuManager.execCommand("input", "keyevent", "120")
+                    saved = keyRes.isSuccess
+                }
+            } else {
+                try {
+                    val intent = Intent("android.intent.action.SCREENSHOT")
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    appContext.startActivity(intent)
+                    saved = true
+                } catch (ignored: Throwable) {}
+            }
+            withContext(Dispatchers.Main) {
+                if (saved) {
+                    android.widget.Toast.makeText(appContext, "Screenshot captured", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    android.widget.Toast.makeText(appContext, "Shizuku required for screenshot capture", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -2886,6 +3047,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 } else {
                     Intent(Settings.ACTION_DISPLAY_SETTINGS)
                 }
+                "airplane" -> Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)
+                "screen_timeout" -> Intent(Settings.ACTION_DISPLAY_SETTINGS)
                 else -> null
             }
             if (intent != null) {
@@ -3828,6 +3991,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 addAction("android.bluetooth.action.LE_AUDIO_CONNECTION_STATE_CHANGED")
                 addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
                 addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+                addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(controlCenterReceiver, controlFilter, Context.RECEIVER_EXPORTED)

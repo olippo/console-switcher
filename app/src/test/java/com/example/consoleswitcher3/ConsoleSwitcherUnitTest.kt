@@ -191,25 +191,32 @@ class ConsoleSwitcherUnitTest {
     @Test
     fun testControlPanelItemsReorderAndToggle() {
         val defaults = com.example.consoleswitcher3.prefs.OverlayPrefs.parseControlPanelItems(null)
-        assertEquals(7, defaults.size)
-        assertTrue(defaults.all { it.enabled })
+        assertEquals(10, defaults.size)
+        val visibleDefaults = defaults.filter { it.enabled }.map { it.id }
+        val hiddenDefaults = defaults.filter { !it.enabled }.map { it.id }
+
         assertEquals(
             listOf("wifi", "bluetooth", "dnd", "dark_mode", "rotation", "battery_saver", "night_light"),
-            defaults.map { it.id }
+            visibleDefaults
+        )
+        assertEquals(
+            listOf("airplane", "screen_timeout", "screenshot"),
+            hiddenDefaults
         )
 
         val custom = listOf(
-            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("night_light", true),
-            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("wifi", false),
-            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("bluetooth", true)
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("screenshot", true),
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("airplane", true),
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("wifi", false)
         )
         val serialized = com.example.consoleswitcher3.prefs.OverlayPrefs.serializeControlPanelItems(custom)
         val parsed = com.example.consoleswitcher3.prefs.OverlayPrefs.parseControlPanelItems(serialized)
 
-        assertEquals(7, parsed.size)
-        assertEquals("night_light", parsed.first().id)
-        assertTrue(parsed.first().enabled)
-        assertEquals("wifi", parsed.last().id)
-        org.junit.Assert.assertFalse(parsed.last().enabled)
+        assertEquals(10, parsed.size)
+        assertEquals("screenshot", parsed[0].id)
+        assertTrue(parsed[0].enabled)
+        assertEquals("airplane", parsed[1].id)
+        assertTrue(parsed[1].enabled)
+        assertTrue(parsed.any { it.id == "wifi" && !it.enabled })
     }
 }
