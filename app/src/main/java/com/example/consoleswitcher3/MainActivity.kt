@@ -3,19 +3,30 @@ package com.example.consoleswitcher3
 import android.app.ActivityOptions
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Canvas
 import android.os.Bundle
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.example.consoleswitcher3.databinding.ActivityMainBinding
 import com.example.consoleswitcher3.prefs.OverlayPrefs
 import com.example.consoleswitcher3.shizuku.ShizukuManager
 import com.example.consoleswitcher3.ui.ColorPickerDialog
+import com.example.consoleswitcher3.ui.ControlPanelSettingsAdapter
 import rikka.shizuku.Shizuku
+import kotlin.math.abs
+import kotlin.math.hypot
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var controlPanelAdapter: ControlPanelSettingsAdapter
+    private lateinit var controlPanelTouchHelper: ItemTouchHelper
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode == ShizukuManager.REQUEST_CODE_SHIZUKU) {
@@ -47,6 +58,7 @@ class MainActivity : AppCompatActivity() {
         Shizuku.addBinderDeadListener(binderDeadListener)
 
         setupButtons()
+        setupControlPanelItems()
         setupAnimSpeed()
         setupCardAppearance()
         setupCardStyle()
@@ -56,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateShizukuStatus()
+        refreshControlPanelItemsUi()
         refreshAnimSpeedUi()
         refreshCardAppearanceUi()
         refreshCardStyleUi()
@@ -92,6 +105,136 @@ class MainActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(this, "Shizuku permission is already granted!", Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    private fun setupControlPanelItems() {
+        val initialItems = OverlayPrefs.getControlPanelItems(this)
+        controlPanelAdapter = ControlPanelSettingsAdapter(
+            initialItems = initialItems,
+            onStartDrag = { holder ->
+                controlPanelTouchHelper.startDrag(holder)
+            },
+            onItemsChanged = { updatedItems ->
+                OverlayPrefs.setControlPanelItems(this, updatedItems)
+            }
+        )
+        binding.rvControlPanelItems.layoutManager = LinearLayoutManager(this)
+        binding.rvControlPanelItems.adapter = controlPanelAdapter
+
+        val density = resources.displayMetrics.density
+        val callback = object : ItemTouchHelper.Callback() {
+
+            override fun isLongPressDragEnabled(): Boolean = true
+
+            override fun isItemViewSwipeEnabled(): Boolean = false
+
+            override fun getMovementFlags(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder
+            ): Int {
+                if (viewHolder !is ControlPanelSettingsAdapter.ItemViewHolder) {
+                    return makeMovementFlags(0, 0)
+                }
+                return makeMovementFlags(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0)
+            }
+
+            override fun chooseDropTarget(
+                selected: RecyclerView.ViewHolder,
+                dropTargets: MutableList<RecyclerView.ViewHolder>,
+                curX: Int,
+                curY: Int
+            ): RecyclerView.ViewHolder? {
+                val selectedCenterY = curY + selected.itemView.height / 2
+                val dy = curY - selected.itemView.top
+                for (target in dropTargets) {
+                    if (target is ControlPanelSettingsAdapter.DividerViewHolder) {
+                        val targetCenterY = (target.itemView.top + target.itemView.bottom) / 2
+                        if (dy > 0 && selectedCenterY > targetCenterY &&
+                            target.itemView.top >= selected.itemView.top
+                        ) {
+                            return target
+                        }
+                        if (dy < 0 && selectedCenterY < targetCenterY &&
+                            target.itemView.bottom <= selected.itemView.bottom
+                        ) {
+                            return target
+                        }
+                    }
+                }
+                return super.chooseDropTarget(selected, dropTargets, curX, curY)
+            }
+
+            override fun onMove(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                val fromPos = viewHolder.bindingAdapterPosition
+                val toPos = target.bindingAdapterPosition
+                if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) {
+                    return false
+                }
+                return controlPanelAdapter.onItemMove(fromPos, toPos)
+            }
+
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+
+            override fun onSelectedChanged(viewHolder: RecyclerView.ViewHolder?, actionState: Int) {
+                super.onSelectedChanged(viewHolder, actionState)
+                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG &&
+                    viewHolder is ControlPanelSettingsAdapter.ItemViewHolder
+                ) {
+                    viewHolder.cardRow.cardElevation = 6f * density
+                }
+            }
+
+            override fun onChildDraw(
+                c: Canvas,
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder,
+                dX: Float,
+                dY: Float,
+                actionState: Int,
+                isCurrentlyActive: Boolean
+            ) {
+                super.onChildDraw(c, recyclerView, viewHolder, 0f, dY, actionState, isCurrentlyActive)
+                if (viewHolder !is ControlPanelSettingsAdapter.ItemViewHolder) return
+                val pos = viewHolder.bindingAdapterPosition
+                val dividerIdx = controlPanelAdapter.getDividerIndex()
+                if (pos != RecyclerView.NO_POSITION && dividerIdx >= 0) {
+                    viewHolder.itemView.alpha = if (pos < dividerIdx) 1.0f else 0.5f
+                }
+            }
+
+            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+                super.clearView(recyclerView, viewHolder)
+                if (viewHolder is ControlPanelSettingsAdapter.ItemViewHolder) {
+                    viewHolder.cardRow.cardElevation = 0f
+                    val pos = viewHolder.bindingAdapterPosition
+                    val dividerIdx = controlPanelAdapter.getDividerIndex()
+                    if (pos != RecyclerView.NO_POSITION && dividerIdx >= 0) {
+                        viewHolder.itemView.alpha = if (pos < dividerIdx) 1.0f else 0.5f
+                    }
+                }
+                controlPanelAdapter.onDragFinished()
+            }
+        }
+
+        controlPanelTouchHelper = ItemTouchHelper(callback)
+        controlPanelTouchHelper.attachToRecyclerView(binding.rvControlPanelItems)
+
+        binding.btnResetControlPanel.setOnClickListener {
+            OverlayPrefs.resetControlPanelItems(this)
+            refreshControlPanelItemsUi()
+        }
+    }
+
+    private fun refreshControlPanelItemsUi() {
+        if (!::controlPanelAdapter.isInitialized) return
+        val current = OverlayPrefs.getControlPanelItems(this)
+        if (controlPanelAdapter.exportItems() != current) {
+            controlPanelAdapter.setItems(current)
         }
     }
 

@@ -187,4 +187,29 @@ class ConsoleSwitcherUnitTest {
         )
         assertEquals(32, appResult)
     }
+
+    @Test
+    fun testControlPanelItemsReorderAndToggle() {
+        val defaults = com.example.consoleswitcher3.prefs.OverlayPrefs.parseControlPanelItems(null)
+        assertEquals(7, defaults.size)
+        assertTrue(defaults.all { it.enabled })
+        assertEquals(
+            listOf("wifi", "bluetooth", "dnd", "dark_mode", "rotation", "battery_saver", "night_light"),
+            defaults.map { it.id }
+        )
+
+        val custom = listOf(
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("night_light", true),
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("wifi", false),
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("bluetooth", true)
+        )
+        val serialized = com.example.consoleswitcher3.prefs.OverlayPrefs.serializeControlPanelItems(custom)
+        val parsed = com.example.consoleswitcher3.prefs.OverlayPrefs.parseControlPanelItems(serialized)
+
+        assertEquals(7, parsed.size)
+        assertEquals("night_light", parsed.first().id)
+        assertTrue(parsed.first().enabled)
+        assertEquals("wifi", parsed.last().id)
+        org.junit.Assert.assertFalse(parsed.last().enabled)
+    }
 }

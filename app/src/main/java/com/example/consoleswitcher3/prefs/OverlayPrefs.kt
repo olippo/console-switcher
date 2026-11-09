@@ -1,6 +1,8 @@
 package com.example.consoleswitcher3.prefs
 
 import android.content.Context
+import androidx.annotation.DrawableRes
+import com.example.consoleswitcher3.R
 
 object OverlayPrefs {
     private const val FILE = "consoleswitcher"
@@ -20,6 +22,22 @@ object OverlayPrefs {
     const val KEY_CARD_BORDER = "card_border"
     const val KEY_CARD_CORNER_RADIUS = "card_corner_radius"
     const val KEY_PREVIEW_BG = "preview_bg"
+    const val KEY_CONTROL_PANEL_ITEMS = "control_panel_items_v1"
+
+    data class ControlItemConfig(
+        val id: String,
+        val enabled: Boolean
+    )
+
+    val DEFAULT_CONTROL_ITEMS: List<String> = listOf(
+        "wifi",
+        "bluetooth",
+        "dnd",
+        "dark_mode",
+        "rotation",
+        "battery_saver",
+        "night_light"
+    )
 
     /** 1.0 = default console navigation speed (matches former 0.5x). Higher = faster. */
     const val DEFAULT_NAV_SPEED = 1.0f
@@ -484,6 +502,113 @@ object OverlayPrefs {
             String.format("#%06X", color and 0x00FFFFFF)
         } else {
             String.format("#%08X", color)
+        }
+    }
+
+    fun getControlPanelItems(context: Context): List<ControlItemConfig> {
+        return try {
+            val raw = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .getString(KEY_CONTROL_PANEL_ITEMS, null)
+            parseControlPanelItems(raw)
+        } catch (ignored: Throwable) {
+            DEFAULT_CONTROL_ITEMS.map { ControlItemConfig(it, true) }
+        }
+    }
+
+    fun setControlPanelItems(context: Context, items: List<ControlItemConfig>) {
+        try {
+            val serialized = serializeControlPanelItems(items)
+            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_CONTROL_PANEL_ITEMS, serialized)
+                .apply()
+        } catch (ignored: Throwable) {}
+    }
+
+    fun resetControlPanelItems(context: Context) {
+        setControlPanelItems(context, DEFAULT_CONTROL_ITEMS.map { ControlItemConfig(it, true) })
+    }
+
+    fun getEnabledControlPanelIds(context: Context): List<String> {
+        return getControlPanelItems(context).filter { it.enabled }.map { it.id }
+    }
+
+    fun parseControlPanelItems(raw: String?): List<ControlItemConfig> {
+        val validIds = DEFAULT_CONTROL_ITEMS.toSet()
+        val seen = mutableSetOf<String>()
+        val enabledList = mutableListOf<ControlItemConfig>()
+        val disabledList = mutableListOf<ControlItemConfig>()
+
+        if (!raw.isNullOrBlank()) {
+            for (token in raw.split(",")) {
+                val parts = token.trim().split(":")
+                val id = parts.getOrNull(0)?.trim().orEmpty()
+                if (id.isEmpty() || id !in validIds || !seen.add(id)) continue
+                val enabled = parts.getOrNull(1)?.trim() != "0"
+                val config = ControlItemConfig(id, enabled)
+                if (enabled) {
+                    enabledList.add(config)
+                } else {
+                    disabledList.add(config)
+                }
+            }
+        }
+
+        for (defaultId in DEFAULT_CONTROL_ITEMS) {
+            if (seen.add(defaultId)) {
+                enabledList.add(ControlItemConfig(defaultId, true))
+            }
+        }
+
+        return enabledList + disabledList
+    }
+
+    fun serializeControlPanelItems(items: List<ControlItemConfig>): String {
+        val validIds = DEFAULT_CONTROL_ITEMS.toSet()
+        val seen = mutableSetOf<String>()
+        val enabledList = mutableListOf<ControlItemConfig>()
+        val disabledList = mutableListOf<ControlItemConfig>()
+
+        for (item in items) {
+            if (item.id !in validIds || !seen.add(item.id)) continue
+            if (item.enabled) {
+                enabledList.add(item)
+            } else {
+                disabledList.add(item)
+            }
+        }
+        for (defaultId in DEFAULT_CONTROL_ITEMS) {
+            if (seen.add(defaultId)) {
+                enabledList.add(ControlItemConfig(defaultId, true))
+            }
+        }
+        return (enabledList + disabledList).joinToString(",") { "${it.id}:${if (it.enabled) 1 else 0}" }
+    }
+
+    fun controlItemTitle(id: String): String {
+        return when (id) {
+            "wifi" -> "Wi-Fi"
+            "bluetooth" -> "Bluetooth"
+            "dnd" -> "Do Not Disturb"
+            "dark_mode" -> "Dark Mode"
+            "rotation" -> "Auto-Rotate"
+            "battery_saver" -> "Battery Saver"
+            "night_light" -> "Night Light"
+            else -> id
+        }
+    }
+
+    @DrawableRes
+    fun controlItemIconRes(id: String): Int {
+        return when (id) {
+            "wifi" -> R.drawable.ic_wifi_rounded
+            "bluetooth" -> R.drawable.ic_bluetooth_rounded
+            "dnd" -> R.drawable.ic_dnd_rounded
+            "dark_mode" -> R.drawable.ic_contrast_rounded
+            "rotation" -> R.drawable.ic_screen_rotation_rounded
+            "battery_saver" -> R.drawable.ic_battery_saver_rounded
+            "night_light" -> R.drawable.ic_nightlight_fill_rounded
+            else -> R.drawable.ic_wifi_rounded
         }
     }
 }

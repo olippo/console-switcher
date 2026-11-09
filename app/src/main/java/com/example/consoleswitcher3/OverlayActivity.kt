@@ -961,10 +961,20 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private fun refreshControlCards() {
         if (!::controlAdapter.isInitialized) return
         val updated = buildControlCards()
-        if (controlCards.size != updated.size) {
+        val idsChanged = controlCards.size != updated.size ||
+            controlCards.indices.any { controlCards[it].id != updated[it].id }
+        if (idsChanged) {
             controlCards.clear()
             controlCards.addAll(updated)
             controlAdapter.updateCards(controlCards)
+            if (controlCards.isNotEmpty()) {
+                val safePos = controlAdapter.selectedPosition.coerceIn(0, controlCards.lastIndex)
+                controlAdapter.selectedPosition = safePos
+                binding.rvControlCenter.post {
+                    updateControlCenterPadding()
+                    jumpControlToCenter(safePos)
+                }
+            }
             return
         }
         for (i in updated.indices) {
@@ -976,23 +986,20 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun buildControlCards(): List<ControlCard> {
-        val wifiEnabled = isWifiEnabled()
-        val btEnabled = isBluetoothEnabled()
-        val dndEnabled = isDndEnabled()
-        val darkEnabled = isDarkModeEnabled()
-        val rotationEnabled = isRotationAutoEnabled()
-        val batterySaverEnabled = isBatterySaverEnabled()
-        val nightLightEnabled = isNightLightEnabled()
-
-        return listOf(
-            buildControlCardForState("wifi", wifiEnabled),
-            buildControlCardForState("bluetooth", btEnabled),
-            buildControlCardForState("dnd", dndEnabled),
-            buildControlCardForState("dark_mode", darkEnabled),
-            buildControlCardForState("rotation", rotationEnabled),
-            buildControlCardForState("battery_saver", batterySaverEnabled),
-            buildControlCardForState("night_light", nightLightEnabled)
-        )
+        val enabledIds = com.example.consoleswitcher3.prefs.OverlayPrefs.getEnabledControlPanelIds(this)
+        return enabledIds.map { id ->
+            val state = when (id) {
+                "wifi" -> isWifiEnabled()
+                "bluetooth" -> isBluetoothEnabled()
+                "dnd" -> isDndEnabled()
+                "dark_mode" -> isDarkModeEnabled()
+                "rotation" -> isRotationAutoEnabled()
+                "battery_saver" -> isBatterySaverEnabled()
+                "night_light" -> isNightLightEnabled()
+                else -> false
+            }
+            buildControlCardForState(id, state)
+        }
     }
 
     private fun buildControlCardForState(id: String, enabled: Boolean): ControlCard {
@@ -1325,14 +1332,21 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private fun openControlMenuAt(position: Int) {
         if (position !in controlCards.indices) return
         val currentCard = controlCards[position]
-        triggerHaptic()
-        animateCardPress(position)
 
         when (currentCard.id) {
-            "wifi" -> openWifiPanel()
-            "bluetooth" -> openBluetoothPanel()
+            "wifi" -> {
+                triggerHaptic()
+                animateCardPress(position)
+                openWifiPanel()
+            }
+            "bluetooth" -> {
+                triggerHaptic()
+                animateCardPress(position)
+                openBluetoothPanel()
+            }
             else -> {
-                // Other control menus
+                // If it's just a toggle and not a menu, have the same function as X
+                toggleControlCardAt(position)
             }
         }
     }
@@ -3067,6 +3081,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         if (targetMode == OverlayMode.CONTROL_CENTER) {
             refreshControlCards()
+            if (controlCards.isEmpty()) return
         }
 
         isTransitioningMode = true
@@ -3841,6 +3856,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         initBrightness()
         lastReportedVolume = getVolumePercent()
         refreshControlCards()
+        if (currentMode == OverlayMode.CONTROL_CENTER && controlCards.isEmpty()) {
+            switchOverlayMode(OverlayMode.APP_SWITCHER, slideUp = false)
+        }
         if (isBluetoothMenuOpen) {
             applyBluetoothModalStyling()
             refreshBluetoothMenuUi()
