@@ -36,7 +36,8 @@ object OverlayPrefs {
         "dark_mode",
         "rotation",
         "battery_saver",
-        "night_light"
+        "night_light",
+        "screen_record"
     )
 
     val DEFAULT_HIDDEN_CONTROL_ITEMS: List<String> = listOf(
@@ -619,6 +620,7 @@ object OverlayPrefs {
             "rotation" -> "Auto-Rotate"
             "battery_saver" -> "Battery Saver"
             "night_light" -> "Night Light"
+            "screen_record" -> "Screen Record"
             "airplane" -> "Airplane Mode"
             "screen_timeout" -> "Prevent Sleep"
             "screenshot" -> "Screenshot"
@@ -636,6 +638,7 @@ object OverlayPrefs {
             "rotation" -> R.drawable.ic_screen_rotation_rounded
             "battery_saver" -> R.drawable.ic_battery_saver_rounded
             "night_light" -> R.drawable.ic_nightlight_fill_rounded
+            "screen_record" -> R.drawable.ic_screen_record_rounded
             "airplane" -> R.drawable.ic_airplanemode_active_rounded
             "screen_timeout" -> R.drawable.ic_screen_timeout_rounded
             "screenshot" -> R.drawable.ic_screenshot_rounded

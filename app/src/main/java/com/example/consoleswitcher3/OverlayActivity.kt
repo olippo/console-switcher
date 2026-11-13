@@ -165,6 +165,34 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private val indicatorHandler = Handler(Looper.getMainLooper())
     private var lastReportedVolume: Int = -1
 
+    private val screenRecordLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == RESULT_OK && data != null) {
+            val appContext = applicationContext
+            dismissSwitcher()
+            kotlinx.coroutines.CoroutineScope(Dispatchers.Main).launch {
+                delay(200L)
+                val serviceIntent = Intent(
+                    appContext,
+                    com.example.consoleswitcher3.service.ScreenRecordService::class.java
+                ).apply {
+                    action = com.example.consoleswitcher3.service.ScreenRecordService.ACTION_START
+                    putExtra(
+                        com.example.consoleswitcher3.service.ScreenRecordService.EXTRA_RESULT_CODE,
+                        result.resultCode
+                    )
+                    putExtra(
+                        com.example.consoleswitcher3.service.ScreenRecordService.EXTRA_RESULT_DATA,
+                        data
+                    )
+                }
+                androidx.core.content.ContextCompat.startForegroundService(appContext, serviceIntent)
+            }
+        }
+    }
+
     private val hideBrightnessRunnable = Runnable {
         binding.layoutBrightness.animate()
             .alpha(0f)
@@ -1027,6 +1055,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 "rotation" -> isRotationAutoEnabled()
                 "battery_saver" -> isBatterySaverEnabled()
                 "night_light" -> isNightLightEnabled()
+                "screen_record" -> com.example.consoleswitcher3.shizuku.ScreenRecordHelper.isRecording
                 "airplane" -> isAirplaneModeEnabled()
                 "screen_timeout" -> isScreenTimeoutKeepAwake()
                 "screenshot" -> true
@@ -1099,6 +1128,15 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 statusSecondary = if (enabled) "Warm Tint Active" else "Standard Display",
                 iconRes = R.drawable.ic_nightlight_fill_rounded,
                 cardIconRes = R.drawable.ic_nightlight_fill_rounded,
+                isEnabled = enabled
+            )
+            "screen_record" -> ControlCard(
+                id = "screen_record",
+                title = "Screen Record",
+                statusPrimary = if (enabled) "Recording" else "Off",
+                statusSecondary = if (enabled) "Tap to Stop" else "Start Recording",
+                iconRes = R.drawable.ic_screen_record_rounded,
+                cardIconRes = R.drawable.ic_screen_record_rounded,
                 isEnabled = enabled
             )
             "airplane" -> ControlCard(
@@ -1463,6 +1501,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 animateCardPress(position)
                 takeScreenshotAction()
             }
+            "screen_record" -> {
+                triggerHaptic()
+                animateCardPress(position)
+                toggleScreenRecordAction()
+            }
             else -> {
                 // If it's just a toggle and not a menu, have the same function as X
                 toggleControlCardAt(position)
@@ -1477,6 +1520,12 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             triggerHaptic()
             animateCardPress(position)
             takeScreenshotAction()
+            return
+        }
+        if (currentCard.id == "screen_record") {
+            triggerHaptic()
+            animateCardPress(position)
+            toggleScreenRecordAction()
             return
         }
         val targetState = !currentCard.isEnabled
@@ -3044,6 +3093,35 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 } else {
                     android.widget.Toast.makeText(appContext, "Shizuku required for screenshot capture", android.widget.Toast.LENGTH_SHORT).show()
                 }
+            }
+        }
+    }
+
+    private fun toggleScreenRecordAction() {
+        val helper = com.example.consoleswitcher3.shizuku.ScreenRecordHelper
+        if (helper.isRecording) {
+            helper.stopRecording(this)
+            refreshControlCards()
+            return
+        }
+
+        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+            as? android.media.projection.MediaProjectionManager
+        if (projectionManager == null) {
+            android.widget.Toast.makeText(
+                applicationContext,
+                "Screen recording unavailable",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                helper.preparePermissionsViaShizuku(this@OverlayActivity)
+            }
+            if (!isFinishing && !isDestroyed) {
+                screenRecordLauncher.launch(projectionManager.createScreenCaptureIntent())
             }
         }
     }
