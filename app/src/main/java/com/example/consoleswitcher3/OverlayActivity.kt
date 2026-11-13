@@ -150,6 +150,15 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private var slideAnimator: ValueAnimator? = null
     private var pendingSlideRunnable: Runnable? = null
     private var modeTransitionAnimator: ValueAnimator? = null
+    private var isEntranceAnimating: Boolean = false
+    private var isWaitingForEntranceLayout: Boolean = false
+    private var hasPlayedEntranceAnimation: Boolean = false
+    private var currentEntranceCenterPos: Int = 0
+    private var currentEntranceStartY: Float = 0f
+    private var entranceGeneration: Int = 0
+    private var entrancePendingCount: Int = 0
+    private var entranceSafetyRunnable: Runnable? = null
+    private val entranceAnimators = mutableListOf<android.view.ViewPropertyAnimator>()
 
     private lateinit var audioManager: AudioManager
     private var currentBrightness: Int = 128
@@ -560,6 +569,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 if (!killInFlight) {
                     val current = pendingTarget ?: taskAdapter.selectedPosition
                     if (clickedPosition == current) {
+                        finishEntranceAnimation()
                         switchTask(task)
                     } else {
                         smoothScrollToCenter(clickedPosition)
@@ -577,6 +587,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         binding.rvTasks.addOnChildAttachStateChangeListener(
             object : RecyclerView.OnChildAttachStateChangeListener {
                 override fun onChildViewAttachedToWindow(view: View) {
+                    onEntranceChildAttached(binding.rvTasks, layoutManager, view)
                     if (view.width > 0 && view.right > view.left) {
                         applyXmbTransform(view)
                     } else {
@@ -586,7 +597,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     }
                 }
 
-                override fun onChildViewDetachedFromWindow(view: View) {}
+                override fun onChildViewDetachedFromWindow(view: View) {
+                    if (isEntranceAnimating) {
+                        view.animate().cancel()
+                        view.translationY = 0f
+                        view.alpha = 1f
+                    }
+                }
             }
         )
 
@@ -817,8 +834,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             }
             child.translationX = Math.signum(signed) * extra * pull + shift
 
-            // Full opacity for every card â€” focus is shown by size/border only
-            if (child.alpha != 1f) child.alpha = 1f
+            // Full opacity for every card — focus is shown by size/border only (except during open entrance)
+            if (!isEntranceAnimating && child.alpha != 1f) child.alpha = 1f
 
             // Center card elevated above neighbors. Discrete (not continuous):
             // animating translationZ every frame rebuilds CardView shadows and
@@ -857,13 +874,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             cardGapPx = getCardGapPx(),
             sideScale = sideScale,
             onCardClick = { clickedPosition, _ ->
-                if (!isTransitioningMode) {
-                    val current = controlPendingTarget ?: controlAdapter.selectedPosition
-                    if (clickedPosition == current) {
+                val current = controlPendingTarget ?: controlAdapter.selectedPosition
+                if (clickedPosition == current) {
+                    if (!isTransitioningMode) {
+                        finishEntranceAnimation()
                         openControlMenuAt(clickedPosition)
-                    } else {
-                        smoothScrollControlToCenter(clickedPosition)
                     }
+                } else {
+                    smoothScrollControlToCenter(clickedPosition)
                 }
             }
         )
@@ -874,6 +892,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         binding.rvControlCenter.addOnChildAttachStateChangeListener(
             object : RecyclerView.OnChildAttachStateChangeListener {
                 override fun onChildViewAttachedToWindow(view: View) {
+                    onEntranceChildAttached(binding.rvControlCenter, controlLayoutManager, view)
                     if (view.width > 0 && view.right > view.left) {
                         applyControlXmbTransform(view)
                     } else {
@@ -883,7 +902,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     }
                 }
 
-                override fun onChildViewDetachedFromWindow(view: View) {}
+                override fun onChildViewDetachedFromWindow(view: View) {
+                    if (isEntranceAnimating) {
+                        view.animate().cancel()
+                        view.translationY = 0f
+                        view.alpha = 1f
+                    }
+                }
             }
         )
 
@@ -974,9 +999,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             if (controlCards.isNotEmpty()) {
                 val safePos = controlAdapter.selectedPosition.coerceIn(0, controlCards.lastIndex)
                 controlAdapter.selectedPosition = safePos
-                binding.rvControlCenter.post {
-                    updateControlCenterPadding()
-                    jumpControlToCenter(safePos)
+                if (!isTransitioningMode) {
+                    binding.rvControlCenter.post {
+                        updateControlCenterPadding()
+                        jumpControlToCenter(safePos)
+                    }
                 }
             }
             return
@@ -1070,8 +1097,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 title = "Night Light",
                 statusPrimary = if (enabled) "On" else "Off",
                 statusSecondary = if (enabled) "Warm Tint Active" else "Standard Display",
-                iconRes = if (enabled) R.drawable.ic_nightlight_fill_rounded else R.drawable.ic_nightlight_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_nightlight_fill_rounded else R.drawable.ic_nightlight_rounded,
+                iconRes = R.drawable.ic_nightlight_fill_rounded,
+                cardIconRes = R.drawable.ic_nightlight_fill_rounded,
                 isEnabled = enabled
             )
             "airplane" -> ControlCard(
@@ -3136,7 +3163,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
         child.translationX = Math.signum(signed) * extra * pull
 
-        if (child.alpha != 1f) child.alpha = 1f
+        if (!isEntranceAnimating && child.alpha != 1f) child.alpha = 1f
 
         val wantZ = if (distance < (child.width * 0.35f)) 20f else 0f
         if (child.translationZ != wantZ) child.translationZ = wantZ
@@ -3230,7 +3257,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun moveControlSelection(delta: Int) {
-        if (isTransitioningMode || controlCards.isEmpty()) return
+        if (controlCards.isEmpty()) return
         val base = controlPendingTarget ?: controlAdapter.selectedPosition
         val newPos = (base + delta).coerceIn(0, controlCards.size - 1)
         if (newPos != base) {
@@ -3335,24 +3362,28 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         val flyDistance = baseHeight.toFloat() * 1.4f
 
         val outgoingTargetY = if (slideUp) -flyDistance else flyDistance
-        val incomingStartY = if (slideUp) flyDistance else -flyDistance
+        val incomingStartY = if (slideUp) getEntranceStartY() else -getEntranceStartY()
 
         // Ensure incoming carousel is snapped to exact center before it becomes visible
         if (targetMode == OverlayMode.CONTROL_CENTER) {
             if (controlCards.isNotEmpty()) {
                 jumpControlToCenter(targetControlPos)
             }
+            updateControlCenterPadding()
             updateControlXmbTransforms()
         } else if (tasks.isNotEmpty()) {
             jumpToCenter(targetTaskPos)
+            updateCenterPadding()
             updateXmbTransforms()
         }
 
         outgoingView.translationY = 0f
         outgoingView.alpha = 1f
-        incomingView.translationY = incomingStartY
-        incomingView.alpha = 0f
+
+        incomingView.translationY = 0f
+        incomingView.alpha = 1f
         incomingView.visibility = View.VISIBLE
+        currentMode = targetMode
 
         val animator = ValueAnimator.ofFloat(0f, 1f).apply {
             this.duration = duration
@@ -3363,8 +3394,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 val fadeProgress = (f * 1.6f).coerceIn(0f, 1f)
                 outgoingView.translationY = outgoingTargetY * f
                 outgoingView.alpha = 1f - fadeProgress
-                incomingView.translationY = incomingStartY * (1f - f)
-                incomingView.alpha = fadeProgress
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -3383,15 +3412,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         jumpControlToCenter(targetControlPos)
                     }
 
-                    incomingView.translationY = 0f
-                    incomingView.alpha = 1f
-                    currentMode = targetMode
                     isTransitioningMode = false
-                    if (targetMode == OverlayMode.CONTROL_CENTER) {
-                        updateControlXmbTransforms()
-                    } else if (tasks.isNotEmpty()) {
-                        updateXmbTransforms()
-                    }
                 }
 
                 override fun onAnimationCancel(animation: Animator) {
@@ -3402,6 +3423,16 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
         modeTransitionAnimator = animator
         animator.start()
+
+        if (targetMode == OverlayMode.CONTROL_CENTER) {
+            if (controlCards.isNotEmpty()) {
+                playStaggeredEntrance(binding.rvControlCenter, controlLayoutManager, targetControlPos, incomingStartY)
+            }
+        } else {
+            if (tasks.isNotEmpty()) {
+                playStaggeredEntrance(binding.rvTasks, layoutManager, targetTaskPos, incomingStartY)
+            }
+        }
     }
 
     private fun setupListeners() {
@@ -3441,8 +3472,11 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 binding.emptyLayout.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.GONE
             } else {
                 binding.emptyLayout.visibility = View.GONE
-                binding.rvTasks.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.INVISIBLE
-
+                val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+                val navSpeed = prefs.getAnimSpeed(this@OverlayActivity)
+                if (!prefs.isAnimOff(navSpeed) && !hasPlayedEntranceAnimation) {
+                    isEntranceAnimating = true
+                }
                 taskAdapter.updateTasks(tasks)
 
                 taskAdapter.selectedPosition = 0
@@ -3453,6 +3487,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     // Jump, don't animate, to the first card on open: a smooth
                     // scroll from an unlaid-out position sweeps the whole strip.
                     jumpToCenter(0)
+                    binding.rvTasks.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.INVISIBLE
+                    startEntranceAnimation()
                 }
             }
 
@@ -3469,6 +3505,240 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     binding.rvTasks.post { updateXmbTransforms() }
                 }
             }
+        }
+    }
+
+    private fun getEntranceStartY(): Float {
+        val density = resources.displayMetrics.density
+        val rvHeight = binding.rvTasks.height.toFloat()
+        val cardH = getCardHeightPx().toFloat()
+        return maxOf(rvHeight, cardH + (80f * density)) + (40f * density)
+    }
+
+    private fun startEntranceAnimation() {
+        if (hasPlayedEntranceAnimation || tasks.isEmpty() || currentMode != OverlayMode.APP_SWITCHER) return
+        hasPlayedEntranceAnimation = true
+
+        val centerPos = taskAdapter.selectedPosition.coerceIn(0, tasks.size - 1)
+        playStaggeredEntrance(binding.rvTasks, layoutManager, centerPos, getEntranceStartY())
+    }
+
+    private fun cancelEntranceSafetyRunnable() {
+        entranceSafetyRunnable?.let {
+            binding.rvTasks.removeCallbacks(it)
+            binding.rvControlCenter.removeCallbacks(it)
+        }
+        entranceSafetyRunnable = null
+    }
+
+    private fun computeEntranceTiming(): Pair<Long, Long>? {
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        val navSpeed = prefs.getAnimSpeed(this)
+        if (prefs.isAnimOff(navSpeed)) return null
+        val navSpeedMult = (navSpeed / com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_NAV_SPEED).coerceIn(0.5f, 3.0f)
+        val duration = (340L / navSpeedMult).toLong().coerceIn(150L, 600L)
+        val stepDelay = (60L / navSpeedMult).toLong().coerceIn(25L, 150L)
+        return duration to stepDelay
+    }
+
+    private fun onEntranceChildAttached(
+        recyclerView: RecyclerView,
+        lm: LinearLayoutManager,
+        view: View
+    ) {
+        if (!isEntranceAnimating) return
+        if (isWaitingForEntranceLayout) {
+            view.animate().cancel()
+            view.translationY = currentEntranceStartY
+            view.alpha = 0f
+            return
+        }
+        val timing = computeEntranceTiming() ?: return
+        val pos = lm.getPosition(view)
+        if (pos == RecyclerView.NO_POSITION) return
+        startCardEntranceAnimator(
+            recyclerView = recyclerView,
+            child = view,
+            pos = pos,
+            startOffsetY = currentEntranceStartY,
+            duration = timing.first,
+            stepDelay = timing.second,
+            generation = entranceGeneration
+        )
+    }
+
+    private fun startCardEntranceAnimator(
+        recyclerView: RecyclerView,
+        child: View,
+        pos: Int,
+        startOffsetY: Float,
+        duration: Long,
+        stepDelay: Long,
+        generation: Int
+    ) {
+        val distance = Math.abs(pos - currentEntranceCenterPos)
+        val delay = (distance * stepDelay).coerceAtLeast(0L)
+
+        child.animate().cancel()
+        child.translationY = startOffsetY
+        child.alpha = 0f
+
+        entrancePendingCount++
+        val anim = child.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setStartDelay(delay)
+            .setDuration(duration)
+            .setInterpolator(DecelerateInterpolator(1.8f))
+            .withEndAction {
+                child.translationY = 0f
+                child.alpha = 1f
+                if (generation != entranceGeneration) return@withEndAction
+                entrancePendingCount--
+                if (entrancePendingCount <= 0) {
+                    isEntranceAnimating = false
+                    entranceAnimators.clear()
+                    cancelEntranceSafetyRunnable()
+                    if (recyclerView === binding.rvControlCenter) {
+                        updateControlXmbTransforms()
+                    } else {
+                        updateXmbTransforms()
+                    }
+                }
+            }
+        entranceAnimators.add(anim)
+        anim.start()
+    }
+
+    private fun playStaggeredEntrance(
+        recyclerView: RecyclerView,
+        layoutManager: LinearLayoutManager,
+        centerPos: Int,
+        startOffsetY: Float
+    ) {
+        if (computeEntranceTiming() == null) {
+            finishEntranceAnimation()
+            return
+        }
+
+        entranceGeneration++
+        val generation = entranceGeneration
+        cancelEntranceSafetyRunnable()
+        entranceAnimators.forEach { it.cancel() }
+        entranceAnimators.clear()
+        entrancePendingCount = 0
+
+        isEntranceAnimating = true
+        currentEntranceCenterPos = centerPos
+        currentEntranceStartY = startOffsetY
+
+        val centerView = layoutManager.findViewByPosition(centerPos)
+        val needsLayout = recyclerView.isLayoutRequested ||
+                recyclerView.childCount == 0 ||
+                centerView == null ||
+                centerView.width <= 0
+
+        if (needsLayout) {
+            isWaitingForEntranceLayout = true
+            // Hide current children immediately so stale cards from previous scroll don't flash
+            for (i in 0 until recyclerView.childCount) {
+                val child = recyclerView.getChildAt(i) ?: continue
+                child.animate().cancel()
+                child.alpha = 0f
+            }
+            recyclerView.doOnNextLayout {
+                if (generation != entranceGeneration || !isEntranceAnimating) return@doOnNextLayout
+                isWaitingForEntranceLayout = false
+                if (recyclerView === binding.rvControlCenter) {
+                    updateControlXmbTransforms()
+                } else {
+                    updateXmbTransforms()
+                }
+                playStaggeredEntranceInternal(recyclerView, layoutManager, centerPos, startOffsetY, generation)
+            }
+            return
+        }
+
+        isWaitingForEntranceLayout = false
+        playStaggeredEntranceInternal(recyclerView, layoutManager, centerPos, startOffsetY, generation)
+    }
+
+    private fun playStaggeredEntranceInternal(
+        recyclerView: RecyclerView,
+        layoutManager: LinearLayoutManager,
+        centerPos: Int,
+        startOffsetY: Float,
+        generation: Int
+    ) {
+        if (generation != entranceGeneration || !isEntranceAnimating) return
+
+        val count = recyclerView.childCount
+        if (count == 0) {
+            isEntranceAnimating = false
+            return
+        }
+
+        val timing = computeEntranceTiming()
+        if (timing == null) {
+            finishEntranceAnimation()
+            return
+        }
+        val (duration, stepDelay) = timing
+
+        currentEntranceCenterPos = centerPos
+        currentEntranceStartY = startOffsetY
+        entranceAnimators.forEach { it.cancel() }
+        entranceAnimators.clear()
+        entrancePendingCount = 0
+        cancelEntranceSafetyRunnable()
+
+        for (i in 0 until count) {
+            val child = recyclerView.getChildAt(i) ?: continue
+            val pos = layoutManager.getPosition(child)
+            if (pos == RecyclerView.NO_POSITION) continue
+            startCardEntranceAnimator(recyclerView, child, pos, startOffsetY, duration, stepDelay, generation)
+        }
+
+        if (entrancePendingCount == 0) {
+            isEntranceAnimating = false
+        } else {
+            val maxDelay = (count * stepDelay)
+            val safetyTimeout = maxDelay + duration + 200L
+            val runnable = Runnable {
+                if (generation == entranceGeneration && isEntranceAnimating) {
+                    finishEntranceAnimation()
+                }
+            }
+            entranceSafetyRunnable = runnable
+            recyclerView.postDelayed(runnable, safetyTimeout)
+        }
+    }
+
+    private fun finishEntranceAnimation() {
+        entranceGeneration++
+        isWaitingForEntranceLayout = false
+        entrancePendingCount = 0
+        cancelEntranceSafetyRunnable()
+        if (!isEntranceAnimating) return
+        isEntranceAnimating = false
+        entranceAnimators.forEach { it.cancel() }
+        entranceAnimators.clear()
+        for (i in 0 until binding.rvTasks.childCount) {
+            val child = binding.rvTasks.getChildAt(i) ?: continue
+            child.animate().cancel()
+            child.translationY = 0f
+            child.alpha = 1f
+        }
+        for (i in 0 until binding.rvControlCenter.childCount) {
+            val child = binding.rvControlCenter.getChildAt(i) ?: continue
+            child.animate().cancel()
+            child.translationY = 0f
+            child.alpha = 1f
+        }
+        if (currentMode == OverlayMode.CONTROL_CENTER) {
+            updateControlXmbTransforms()
+        } else {
+            updateXmbTransforms()
         }
     }
 
@@ -3585,6 +3855,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun switchTask(task: DeckTask) {
+        finishEntranceAnimation()
         triggerHaptic()
         if (task.isCurrentTask) {
             dismissSwitcher()
@@ -3607,6 +3878,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private fun killSelectedTask() {
         if (killInFlight) return
+        finishEntranceAnimation()
         // Kill what is VISUALLY centered (border + label + full size are all
         // distance-driven, so the strip center is the selection truth).
         val victimPos = findCenterPosition()
@@ -3940,6 +4212,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private fun dismissSwitcher() {
         killInFlight = false
+        finishEntranceAnimation()
         pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
         pendingSlideRunnable = null
         slideAnimator?.cancel()
@@ -4032,9 +4305,17 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        hasPlayedEntranceAnimation = false
+        loadTasks()
+    }
+
     override fun onPause() {
         super.onPause()
         killInFlight = false
+        finishEntranceAnimation()
         isTransitioningMode = false
         gamepadHelper.reset()
     }
@@ -4042,6 +4323,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     override fun onDestroy() {
         super.onDestroy()
         killInFlight = false
+        finishEntranceAnimation()
         isTransitioningMode = false
         closeBluetoothProfiles()
         gamepadHelper.reset()
@@ -4348,7 +4630,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     // GamepadListener Callbacks
     override fun onNavLeft() {
-        if (isTransitioningMode || isControlModalOpen) return
+        if (isControlModalOpen) return
         if (currentMode == OverlayMode.APP_SWITCHER) {
             moveSelection(-1)
         } else {
@@ -4357,7 +4639,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavRight() {
-        if (isTransitioningMode || isControlModalOpen) return
+        if (isControlModalOpen) return
         if (currentMode == OverlayMode.APP_SWITCHER) {
             moveSelection(1)
         } else {
@@ -4367,6 +4649,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavUp() {
         if (isTransitioningMode || killInFlight) return
+        finishEntranceAnimation()
         if (isControlModalOpen) {
             moveBluetoothSelection(-1)
             return
@@ -4381,6 +4664,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onNavDown() {
         if (isTransitioningMode || killInFlight) return
+        finishEntranceAnimation()
         if (isControlModalOpen) {
             moveBluetoothSelection(1)
             return
@@ -4394,7 +4678,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavStart() {
-        if (isTransitioningMode || killInFlight) return
+        if (killInFlight) return
         if (isControlModalOpen) {
             if (bluetoothDeviceAdapter.itemCount > 0 && bluetoothDeviceAdapter.selectedPosition != 0) {
                 triggerHaptic()
@@ -4419,7 +4703,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavEnd() {
-        if (isTransitioningMode || killInFlight) return
+        if (killInFlight) return
         if (isControlModalOpen) {
             val end = bluetoothDeviceAdapter.itemCount - 1
             if (end >= 0 && bluetoothDeviceAdapter.selectedPosition != end) {
@@ -4464,6 +4748,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onButtonSelect() {
         if (isTransitioningMode) return
+        finishEntranceAnimation()
         if (isBluetoothMenuOpen) {
             handleSelectedBluetoothDeviceAction()
             return
@@ -4481,6 +4766,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onButtonBack() {
         if (killInFlight || isTransitioningMode) return
+        finishEntranceAnimation()
         if (isControlModalOpen) {
             closeControlModal()
             return
@@ -4490,6 +4776,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onButtonAction() {
         if (isTransitioningMode) return
+        finishEntranceAnimation()
         if (isBluetoothMenuOpen) {
             toggleBluetoothFromModal()
             return
@@ -4507,6 +4794,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onButtonY() {
         if (killInFlight || isTransitioningMode) return
+        finishEntranceAnimation()
         toggleBackgroundMedia()
     }
 
