@@ -13,6 +13,8 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.ContextCompat
+import com.example.consoleswitcher3.R
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlin.math.roundToInt
 
@@ -26,19 +28,19 @@ import kotlin.math.roundToInt
  */
 object ColorPickerDialog {
 
-    val PRESETS = intArrayOf(
-        0xFF00E5FF.toInt(), // cyan
-        0xFF00E676.toInt(), // green
-        0xFFFFB300.toInt(), // amber
-        0xFFFF3D71.toInt(), // red
-        0xFF7C4DFF.toInt(), // purple
-        0xFFFFFFFF.toInt(), // white
-        0xFF000000.toInt(), // black
-        0xFF090D14.toInt(), // navy
-        0xFF151E2B.toInt(), // slate / card bg
-        0xFF1C283B.toInt(), // focused card
-        0xFF334155.toInt(), // card border
-        0xFF0A0F1A.toInt(), // preview placeholder
+    private val PRESET_COLOR_RES = intArrayOf(
+        R.color.deck_accent_cyan,
+        R.color.deck_accent_green,
+        R.color.deck_accent_amber,
+        R.color.deck_accent_red,
+        R.color.deck_accent_purple,
+        R.color.white,
+        R.color.black,
+        R.color.deck_bg_dark,
+        R.color.deck_card_bg,
+        R.color.deck_card_border,
+        R.color.deck_text_muted,
+        R.color.deck_preview_bg,
     )
 
     fun show(
@@ -63,6 +65,7 @@ object ColorPickerDialog {
     ) {
         val density = context.resources.displayMetrics.density
         fun dp(v: Int) = (v * density).roundToInt()
+        val strokeColor = ContextCompat.getColor(context, R.color.deck_text_muted)
 
         val alpha = Color.alpha(initialColor)
         var r = Color.red(initialColor)
@@ -96,7 +99,7 @@ object ColorPickerDialog {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = 8f * density
                 setColor(currentColor())
-                setStroke(dp(1), 0xFF64748B.toInt())
+                setStroke(dp(1), strokeColor)
             }
         }
         refreshPreview()
@@ -192,7 +195,8 @@ object ColorPickerDialog {
         })
         // Two rows of 6 swatches using plain LinearLayouts (no GridLayout).
         var row: LinearLayout? = null
-        PRESETS.forEachIndexed { index, preset ->
+        val presets = PRESET_COLOR_RES.map { ContextCompat.getColor(context, it) }
+        presets.forEachIndexed { index, preset ->
             if (index % 6 == 0) {
                 row = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -211,7 +215,7 @@ object ColorPickerDialog {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(preset)
-                    setStroke(dp(1), 0xFF64748B.toInt())
+                    setStroke(dp(1), strokeColor)
                 }
                 isClickable = true
                 isFocusable = true

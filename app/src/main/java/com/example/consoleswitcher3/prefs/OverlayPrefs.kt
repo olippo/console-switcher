@@ -1,7 +1,9 @@
 package com.example.consoleswitcher3.prefs
 
 import android.content.Context
+import androidx.annotation.ColorRes
 import androidx.annotation.DrawableRes
+import androidx.core.content.ContextCompat
 import com.example.consoleswitcher3.R
 
 object OverlayPrefs {
@@ -86,26 +88,32 @@ object OverlayPrefs {
     const val DEFAULT_CARD_GAP = 8f
     /** Distance of the card strip from the bottom edge in dp. */
     const val DEFAULT_BOTTOM_GAP = 50f
-    /** Base background color (RGB). Combined with opacity below. */
-    const val DEFAULT_BG_COLOR = 0xFF000000.toInt()
     /** Background opacity 0 = fully transparent, 1 = solid. */
     const val DEFAULT_BG_OPACITY = 0f
     /** Height of the bottom gradient scrim in dp. 0 = no scrim. */
     const val DEFAULT_BG_GRADIENT_HEIGHT = 300f
-    /** Focused-card border color (ARGB). */
-    const val DEFAULT_BORDER_COLOR = 0xFF00E5FF.toInt()
     /** Card border thickness in dp (focused + unfocused). 0 = no border. */
     const val DEFAULT_BORDER_WIDTH = 2.5f
     /** Card corner radius in dp. Hardcoded default is 8dp. */
     const val DEFAULT_CARD_CORNER_RADIUS = 8f
-    /** Unfocused card fill (ARGB). Default is the currently open app's color (#1D1D1D). */
-    const val DEFAULT_CARD_BG = 0xFF1D1D1D.toInt()
-    /** Focused card fill (ARGB). Default is the currently open app's color (#1D1D1D). */
-    const val DEFAULT_CARD_FOCUSED_BG = 0xFF1D1D1D.toInt()
-    /** Unfocused card border (ARGB). */
-    const val DEFAULT_CARD_BORDER = 0xFF334155.toInt()
-    /** Placeholder behind previews when no snapshot/icon yet (ARGB). */
-    const val DEFAULT_PREVIEW_BG = 0xFF0A0F1A.toInt()
+
+    fun defaultBgColor(context: Context): Int =
+        ContextCompat.getColor(context, R.color.black)
+
+    fun defaultBorderColor(context: Context): Int =
+        ContextCompat.getColor(context, R.color.deck_card_border_focused)
+
+    fun defaultCardBg(context: Context): Int =
+        ContextCompat.getColor(context, R.color.deck_card_bg)
+
+    fun defaultCardFocusedBg(context: Context): Int =
+        ContextCompat.getColor(context, R.color.deck_card_focused)
+
+    fun defaultCardBorder(context: Context): Int =
+        ContextCompat.getColor(context, R.color.deck_card_border)
+
+    fun defaultPreviewBg(context: Context): Int =
+        ContextCompat.getColor(context, R.color.deck_preview_bg)
 
     fun getAnimSpeed(context: Context): Float {
         return try {
@@ -301,9 +309,9 @@ object OverlayPrefs {
     fun getBgColor(context: Context): Int {
         return try {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_BG_COLOR, DEFAULT_BG_COLOR)
+                .getInt(KEY_BG_COLOR, defaultBgColor(context))
         } catch (ignored: Throwable) {
-            DEFAULT_BG_COLOR
+            defaultBgColor(context)
         }
     }
 
@@ -370,9 +378,9 @@ object OverlayPrefs {
     fun getBorderColor(context: Context): Int {
         return try {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_BORDER_COLOR, DEFAULT_BORDER_COLOR)
+                .getInt(KEY_BORDER_COLOR, defaultBorderColor(context))
         } catch (ignored: Throwable) {
-            DEFAULT_BORDER_COLOR
+            defaultBorderColor(context)
         }
     }
 
@@ -410,11 +418,12 @@ object OverlayPrefs {
 
     fun getCardBg(context: Context): Int {
         return try {
+            val defaultColor = defaultCardBg(context)
             val color = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_CARD_BG, DEFAULT_CARD_BG)
-            if (color == 0xFF151E2B.toInt()) DEFAULT_CARD_BG else color
+                .getInt(KEY_CARD_BG, defaultColor)
+            if (color == 0xFF151E2B.toInt()) defaultColor else color
         } catch (ignored: Throwable) {
-            DEFAULT_CARD_BG
+            defaultCardBg(context)
         }
     }
 
@@ -430,11 +439,12 @@ object OverlayPrefs {
 
     fun getCardFocusedBg(context: Context): Int {
         return try {
+            val defaultColor = defaultCardFocusedBg(context)
             val color = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_CARD_FOCUSED_BG, DEFAULT_CARD_FOCUSED_BG)
-            if (color == 0xFF1C283B.toInt() || color == 0xFF151E2B.toInt()) DEFAULT_CARD_FOCUSED_BG else color
+                .getInt(KEY_CARD_FOCUSED_BG, defaultColor)
+            if (color == 0xFF1C283B.toInt() || color == 0xFF151E2B.toInt()) defaultColor else color
         } catch (ignored: Throwable) {
-            DEFAULT_CARD_FOCUSED_BG
+            defaultCardFocusedBg(context)
         }
     }
 
@@ -473,9 +483,9 @@ object OverlayPrefs {
     fun getCardBorder(context: Context): Int {
         return try {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_CARD_BORDER, DEFAULT_CARD_BORDER)
+                .getInt(KEY_CARD_BORDER, defaultCardBorder(context))
         } catch (ignored: Throwable) {
-            DEFAULT_CARD_BORDER
+            defaultCardBorder(context)
         }
     }
 
@@ -491,9 +501,9 @@ object OverlayPrefs {
     fun getPreviewBg(context: Context): Int {
         return try {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_PREVIEW_BG, DEFAULT_PREVIEW_BG)
+                .getInt(KEY_PREVIEW_BG, defaultPreviewBg(context))
         } catch (ignored: Throwable) {
-            DEFAULT_PREVIEW_BG
+            defaultPreviewBg(context)
         }
     }
 
@@ -504,6 +514,17 @@ object OverlayPrefs {
                 .putInt(KEY_PREVIEW_BG, color)
                 .apply()
         } catch (ignored: Throwable) {}
+    }
+
+    fun resetColorsToDefaults(context: Context) {
+        setBorderColor(context, defaultBorderColor(context))
+        setCardBorder(context, defaultCardBorder(context))
+        setBorderWidthDp(context, DEFAULT_BORDER_WIDTH)
+        setCardCornerRadiusDp(context, DEFAULT_CARD_CORNER_RADIUS)
+        setBgColor(context, defaultBgColor(context))
+        setCardBg(context, defaultCardBg(context))
+        setCardFocusedBg(context, defaultCardFocusedBg(context))
+        setPreviewBg(context, defaultPreviewBg(context))
     }
 
     /** "#RRGGBB" (opaque) or "#AARRGGBB" when alpha != FF. */
@@ -643,6 +664,33 @@ object OverlayPrefs {
             "screen_timeout" -> R.drawable.ic_screen_timeout_rounded
             "screenshot" -> R.drawable.ic_screenshot_rounded
             else -> R.drawable.ic_wifi_rounded
+        }
+    }
+
+    @ColorRes
+    fun controlItemActiveColorRes(id: String): Int? {
+        return when (id) {
+            "wifi" -> R.color.green
+            "bluetooth" -> R.color.blue
+            "dnd" -> R.color.purple
+            "dark_mode" -> R.color.indigo
+            "rotation" -> R.color.white
+            "battery_saver" -> R.color.green
+            "night_light" -> R.color.yellow
+            "screen_record" -> R.color.red
+            "airplane" -> R.color.orange
+            "screen_timeout" -> R.color.white
+            "screenshot" -> R.color.white
+            else -> null
+        }
+    }
+
+    fun controlItemActiveColor(context: Context, id: String): Int {
+        val resId = controlItemActiveColorRes(id)
+        return if (resId != null) {
+            ContextCompat.getColor(context, resId)
+        } else {
+            getBorderColor(context)
         }
     }
 }

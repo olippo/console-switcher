@@ -336,14 +336,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         binding.btnResetColors.setOnClickListener {
-            OverlayPrefs.setBorderColor(this, OverlayPrefs.DEFAULT_BORDER_COLOR)
-            OverlayPrefs.setCardBorder(this, OverlayPrefs.DEFAULT_CARD_BORDER)
-            OverlayPrefs.setBorderWidthDp(this, OverlayPrefs.DEFAULT_BORDER_WIDTH)
-            OverlayPrefs.setCardCornerRadiusDp(this, OverlayPrefs.DEFAULT_CARD_CORNER_RADIUS)
-            OverlayPrefs.setBgColor(this, OverlayPrefs.DEFAULT_BG_COLOR)
-            OverlayPrefs.setCardBg(this, OverlayPrefs.DEFAULT_CARD_BG)
-            OverlayPrefs.setCardFocusedBg(this, OverlayPrefs.DEFAULT_CARD_FOCUSED_BG)
-            OverlayPrefs.setPreviewBg(this, OverlayPrefs.DEFAULT_PREVIEW_BG)
+            OverlayPrefs.resetColorsToDefaults(this)
             refreshCardStyleUi()
             refreshOverlayBackgroundUi()
         }

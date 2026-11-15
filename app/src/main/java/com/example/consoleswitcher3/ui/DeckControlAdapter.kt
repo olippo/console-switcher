@@ -125,30 +125,13 @@ class DeckControlAdapter(
             tvControlTitle?.text = card.title
 
             val iconColor = if (card.isEnabled) {
-                activeIconColorFor(card.id, context)
+                OverlayPrefs.controlItemActiveColor(context, card.id)
             } else {
                 OverlayPrefs.getCardBorder(context)
             }
 
             ivControlCardIcon?.let {
                 ImageViewCompat.setImageTintList(it, ColorStateList.valueOf(iconColor))
-            }
-        }
-
-        private fun activeIconColorFor(id: String, context: android.content.Context): Int {
-            return when (id) {
-                "screen_record" -> 0xFFF87171.toInt()
-                "airplane" -> 0xFFFB923C.toInt()
-                "night_light" -> 0xFFFBBF24.toInt()
-                "battery_saver" -> 0xFF4ADE80.toInt()
-                "rotation" -> 0xFFFFFFFF.toInt()
-                "screen_timeout" -> 0xFFFFFFFF.toInt()
-                "wifi" -> 0xFF4ADE80.toInt()
-                "bluetooth" -> 0xFF60A5FA.toInt()
-                "dnd" -> 0xFFC084FC.toInt()
-                "screenshot" -> 0xFFFFFFFF.toInt()
-                "dark_mode" -> 0xFF818CF8.toInt()
-                else -> OverlayPrefs.getBorderColor(context)
             }
         }
 
