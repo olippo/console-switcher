@@ -88,7 +88,7 @@ object ScreenRecordHelper {
             .setContentText("Recording in progress • Tap to stop")
             .setOngoing(true)
             .setUsesChronometer(true)
-            .setColor(0xFFE53935.toInt())
+            .setColor(ContextCompat.getColor(appContext, R.color.red))
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setContentIntent(stopPendingIntent)

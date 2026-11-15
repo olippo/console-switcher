@@ -191,12 +191,12 @@ class ConsoleSwitcherUnitTest {
     @Test
     fun testControlPanelItemsReorderAndToggle() {
         val defaults = com.example.consoleswitcher3.prefs.OverlayPrefs.parseControlPanelItems(null)
-        assertEquals(10, defaults.size)
+        assertEquals(11, defaults.size)
         val visibleDefaults = defaults.filter { it.enabled }.map { it.id }
         val hiddenDefaults = defaults.filter { !it.enabled }.map { it.id }
 
         assertEquals(
-            listOf("wifi", "bluetooth", "dnd", "dark_mode", "rotation", "battery_saver", "night_light"),
+            listOf("wifi", "bluetooth", "dnd", "dark_mode", "rotation", "battery_saver", "night_light", "screen_record"),
             visibleDefaults
         )
         assertEquals(
@@ -212,7 +212,7 @@ class ConsoleSwitcherUnitTest {
         val serialized = com.example.consoleswitcher3.prefs.OverlayPrefs.serializeControlPanelItems(custom)
         val parsed = com.example.consoleswitcher3.prefs.OverlayPrefs.parseControlPanelItems(serialized)
 
-        assertEquals(10, parsed.size)
+        assertEquals(11, parsed.size)
         assertEquals("screenshot", parsed[0].id)
         assertTrue(parsed[0].enabled)
         assertEquals("airplane", parsed[1].id)

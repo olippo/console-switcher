@@ -40,7 +40,7 @@ object ColorPickerDialog {
         R.color.deck_card_bg,
         R.color.deck_card_border,
         R.color.deck_text_muted,
-        R.color.deck_preview_bg,
+        R.color.blue,
     )
 
     fun show(

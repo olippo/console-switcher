@@ -71,6 +71,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.ShizukuBinderWrapper
+import java.lang.ref.WeakReference
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 
 class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener {
@@ -108,7 +110,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private val busyBluetoothAddresses = mutableMapOf<String, String>()
     private val busyBluetoothTimestamps = mutableMapOf<String, Long>()
     private val errorBluetoothAddresses = mutableSetOf<String>()
-    private val bluetoothProfiles = mutableMapOf<Int, BluetoothProfile>()
+    private val bluetoothProfiles: Map<Int, BluetoothProfile>
+        get() = sharedBluetoothProfiles
 
     private data class SavedWifiEntry(
         val networkId: Int,
@@ -249,6 +252,28 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         private const val PROFILE_HID_HOST = 4 // BluetoothProfile.HID_HOST / INPUT_DEVICE
         private const val ACTION_BLUETOOTH_SETTINGS = "__bluetooth_settings__"
         private const val ACTION_WIFI_SETTINGS = "__wifi_settings__"
+
+        private val sharedBluetoothProfiles = ConcurrentHashMap<Int, BluetoothProfile>()
+        private val requestedBluetoothProfiles = ConcurrentHashMap.newKeySet<Int>()
+        @Volatile
+        private var activeOverlayRef: WeakReference<OverlayActivity>? = null
+
+        private val sharedProfileListener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                sharedBluetoothProfiles[profile] = proxy
+                val activity = activeOverlayRef?.get()
+                if (activity != null && !activity.isDestroyed && !activity.isFinishing) {
+                    if (activity.isBluetoothMenuOpen) {
+                        activity.refreshBluetoothMenuUi()
+                    }
+                }
+            }
+
+            override fun onServiceDisconnected(profile: Int) {
+                sharedBluetoothProfiles.remove(profile)
+                requestedBluetoothProfiles.remove(profile)
+            }
+        }
     }
 
     private data class PendingToggle(
@@ -1066,116 +1091,26 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun buildControlCardForState(id: String, enabled: Boolean): ControlCard {
-        return when (id) {
-            "wifi" -> ControlCard(
-                id = "wifi",
-                title = "Wi-Fi",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Wireless Enabled" else "Disabled",
-                iconRes = if (enabled) R.drawable.ic_wifi_rounded else R.drawable.ic_wifi_off_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_wifi_rounded else R.drawable.ic_wifi_off_rounded,
-                isEnabled = enabled
-            )
-            "bluetooth" -> ControlCard(
-                id = "bluetooth",
-                title = "Bluetooth",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Discoverable & Active" else "Disabled",
-                iconRes = if (enabled) R.drawable.ic_bluetooth_rounded else R.drawable.ic_bluetooth_disabled_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_bluetooth_rounded else R.drawable.ic_bluetooth_disabled_rounded,
-                isEnabled = enabled
-            )
-            "dnd" -> ControlCard(
-                id = "dnd",
-                title = "Do Not Disturb",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Notifications Silenced" else "Alerts Allowed",
-                iconRes = if (enabled) R.drawable.ic_dnd_rounded else R.drawable.ic_dnd_off_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_dnd_rounded else R.drawable.ic_dnd_off_rounded,
-                isEnabled = enabled
-            )
-            "dark_mode" -> ControlCard(
-                id = "dark_mode",
-                title = "Dark Mode",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Dark Theme Active" else "Light Theme Active",
-                iconRes = R.drawable.ic_contrast_rounded,
-                cardIconRes = R.drawable.ic_contrast_rounded,
-                isEnabled = enabled
-            )
-            "rotation" -> ControlCard(
-                id = "rotation",
-                title = "Auto-Rotate",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Auto-Rotation Active" else "Rotation Locked",
-                iconRes = if (enabled) R.drawable.ic_screen_rotation_rounded else R.drawable.ic_screen_lock_rotation_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_screen_rotation_rounded else R.drawable.ic_screen_lock_rotation_rounded,
-                isEnabled = enabled
-            )
-            "battery_saver" -> ControlCard(
-                id = "battery_saver",
-                title = "Battery Saver",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Power Saving Active" else "Standard Power",
-                iconRes = if (enabled) R.drawable.ic_battery_saver_rounded else R.drawable.ic_battery_full_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_battery_saver_rounded else R.drawable.ic_battery_full_rounded,
-                isEnabled = enabled
-            )
-            "night_light" -> ControlCard(
-                id = "night_light",
-                title = "Night Light",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Warm Tint Active" else "Standard Display",
-                iconRes = R.drawable.ic_nightlight_fill_rounded,
-                cardIconRes = R.drawable.ic_nightlight_fill_rounded,
-                isEnabled = enabled
-            )
-            "screen_record" -> ControlCard(
-                id = "screen_record",
-                title = "Screen Record",
-                statusPrimary = if (enabled) "Recording" else "Off",
-                statusSecondary = if (enabled) "Tap to Stop" else "Start Recording",
-                iconRes = R.drawable.ic_screen_record_rounded,
-                cardIconRes = R.drawable.ic_screen_record_rounded,
-                isEnabled = enabled
-            )
-            "airplane" -> ControlCard(
-                id = "airplane",
-                title = "Airplane Mode",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Radios Disabled" else "Radios Active",
-                iconRes = if (enabled) R.drawable.ic_airplanemode_active_rounded else R.drawable.ic_airplanemode_inactive_rounded,
-                cardIconRes = if (enabled) R.drawable.ic_airplanemode_active_rounded else R.drawable.ic_airplanemode_inactive_rounded,
-                isEnabled = enabled
-            )
-            "screen_timeout" -> ControlCard(
-                id = "screen_timeout",
-                title = "Prevent Sleep",
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = if (enabled) "Screen Stays Awake" else "Standard Sleep Timeout",
-                iconRes = R.drawable.ic_screen_timeout_rounded,
-                cardIconRes = R.drawable.ic_screen_timeout_rounded,
-                isEnabled = enabled
-            )
-            "screenshot" -> ControlCard(
-                id = "screenshot",
-                title = "Screenshot",
-                statusPrimary = "Capture",
-                statusSecondary = "Take Screenshot",
-                iconRes = R.drawable.ic_screenshot_rounded,
-                cardIconRes = R.drawable.ic_screenshot_rounded,
-                isEnabled = true
-            )
-            else -> ControlCard(
-                id = id,
-                title = id,
-                statusPrimary = if (enabled) "On" else "Off",
-                statusSecondary = "",
-                iconRes = R.drawable.ic_wifi_rounded,
-                cardIconRes = R.drawable.ic_wifi_rounded,
-                isEnabled = enabled
-            )
+        val iconRes = when (id) {
+            "wifi" -> if (enabled) R.drawable.ic_wifi_rounded else R.drawable.ic_wifi_off_rounded
+            "bluetooth" -> if (enabled) R.drawable.ic_bluetooth_rounded else R.drawable.ic_bluetooth_disabled_rounded
+            "dnd" -> if (enabled) R.drawable.ic_dnd_rounded else R.drawable.ic_dnd_off_rounded
+            "dark_mode" -> R.drawable.ic_contrast_rounded
+            "rotation" -> if (enabled) R.drawable.ic_screen_rotation_rounded else R.drawable.ic_screen_lock_rotation_rounded
+            "battery_saver" -> if (enabled) R.drawable.ic_battery_saver_rounded else R.drawable.ic_battery_full_rounded
+            "night_light" -> R.drawable.ic_nightlight_fill_rounded
+            "screen_record" -> R.drawable.ic_screen_record_rounded
+            "airplane" -> if (enabled) R.drawable.ic_airplanemode_active_rounded else R.drawable.ic_airplanemode_inactive_rounded
+            "screen_timeout" -> R.drawable.ic_screen_timeout_rounded
+            "screenshot" -> R.drawable.ic_screenshot_rounded
+            else -> R.drawable.ic_wifi_rounded
         }
+        return ControlCard(
+            id = id,
+            title = com.example.consoleswitcher3.prefs.OverlayPrefs.controlItemTitle(id),
+            cardIconRes = iconRes,
+            isEnabled = if (id == "screenshot") true else enabled
+        )
     }
 
     private fun isWifiEnabled(): Boolean {
@@ -1613,21 +1548,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun initBluetoothProfiles() {
+        activeOverlayRef = WeakReference(this)
         try {
             val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             val adapter = bm?.adapter ?: return
-            val profileListener = object : BluetoothProfile.ServiceListener {
-                override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                    bluetoothProfiles[profile] = proxy
-                    if (isBluetoothMenuOpen) {
-                        refreshBluetoothMenuUi()
-                    }
-                }
-
-                override fun onServiceDisconnected(profile: Int) {
-                    bluetoothProfiles.remove(profile)
-                }
-            }
             val profilesToBind = mutableListOf(
                 BluetoothProfile.HEADSET,
                 BluetoothProfile.A2DP,
@@ -1640,26 +1564,24 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 profilesToBind.add(22) // BluetoothProfile.LE_AUDIO
             }
             for (p in profilesToBind) {
-                if (!bluetoothProfiles.containsKey(p)) {
+                if (!sharedBluetoothProfiles.containsKey(p) && requestedBluetoothProfiles.add(p)) {
                     try {
-                        adapter.getProfileProxy(applicationContext, profileListener, p)
-                    } catch (ignored: Throwable) {}
+                        val started = adapter.getProfileProxy(applicationContext, sharedProfileListener, p)
+                        if (!started) {
+                            requestedBluetoothProfiles.remove(p)
+                        }
+                    } catch (ignored: Throwable) {
+                        requestedBluetoothProfiles.remove(p)
+                    }
                 }
             }
         } catch (ignored: Throwable) {}
     }
 
     private fun closeBluetoothProfiles() {
-        try {
-            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
-            val adapter = bm?.adapter ?: return
-            for ((profileId, proxy) in bluetoothProfiles) {
-                try {
-                    adapter.closeProfileProxy(profileId, proxy)
-                } catch (ignored: Throwable) {}
-            }
-            bluetoothProfiles.clear()
-        } catch (ignored: Throwable) {}
+        if (activeOverlayRef?.get() === this) {
+            activeOverlayRef = null
+        }
     }
 
     private fun hasBluetoothRuntimePermission(): Boolean {
@@ -2013,11 +1935,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 }
                 val hasError = !isCleanConnected && !isBusy && errorBluetoothAddresses.contains(addr)
 
-                val statusText = when {
-                    isBusy -> (busyText ?: if (isDisconnecting) "Disconnecting..." else "Connecting...")
-                    isCleanConnected -> "Connected"
-                    else -> ""
-                }
                 items.add(
                     BluetoothDeviceItem(
                         address = addr,
@@ -2025,7 +1942,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         isConnected = isCleanConnected,
                         isBusy = isBusy,
                         hasError = hasError,
-                        statusText = statusText,
                         iconRes = getBluetoothDeviceIcon(device),
                         device = device,
                         isSettingsAction = false
@@ -2049,7 +1965,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 name = "Pair new device",
                 isConnected = false,
                 isBusy = false,
-                statusText = "",
                 iconRes = R.drawable.ic_add_rounded,
                 device = null,
                 isSettingsAction = true
@@ -2612,7 +2527,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     isConnected = isCleanConnected,
                     isBusy = isBusy,
                     hasError = hasError,
-                    statusText = "",
                     iconRes = R.drawable.ic_wifi_rounded,
                     device = null,
                     networkId = entry.networkId,
@@ -2639,7 +2553,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     isConnected = isCleanConnected,
                     isBusy = isBusy,
                     hasError = hasError,
-                    statusText = "",
                     iconRes = R.drawable.ic_wifi_rounded,
                     device = null,
                     networkId = activeStatus.networkId,
@@ -2661,7 +2574,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 name = "Add new network",
                 isConnected = false,
                 isBusy = false,
-                statusText = "",
                 iconRes = R.drawable.ic_add_rounded,
                 device = null,
                 networkId = -1,
@@ -3345,7 +3257,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     private fun switchOverlayMode(targetMode: OverlayMode, slideUp: Boolean) {
         if (currentMode == targetMode || isTransitioningMode || killInFlight) return
-        if (binding.loadingLayout.visibility == View.VISIBLE) return
 
         if (targetMode == OverlayMode.CONTROL_CENTER) {
             refreshControlCards()
@@ -3526,16 +3437,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun loadTasks() {
-        binding.loadingLayout.visibility = View.VISIBLE
         binding.emptyLayout.visibility = View.GONE
         binding.rvTasks.visibility = View.INVISIBLE
 
         lifecycleScope.launch {
-            val queriedTasks = TaskManager.getRecentTasks(this@OverlayActivity)
+            var currentTasks = TaskManager.getRecentTasks(this@OverlayActivity)
             tasks.clear()
-            tasks.addAll(queriedTasks)
-
-            binding.loadingLayout.visibility = View.GONE
+            tasks.addAll(currentTasks)
 
             if (tasks.isEmpty()) {
                 val hasPermission = ShizukuManager.hasShizukuPermission()
@@ -3560,30 +3468,42 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 taskAdapter.selectedPosition = 0
                 pendingTarget = null
                 programmaticScroll = false
-                binding.rvTasks.post {
-                    updateCenterPadding()
-                    // Jump, don't animate, to the first card on open: a smooth
-                    // scroll from an unlaid-out position sweeps the whole strip.
-                    jumpToCenter(0)
-                    binding.rvTasks.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.INVISIBLE
-                    startEntranceAnimation()
-                }
+                updateCenterPadding()
+                jumpToCenter(0)
+                binding.rvTasks.visibility = if (currentMode == OverlayMode.APP_SWITCHER) View.VISIBLE else View.INVISIBLE
+                startEntranceAnimation()
             }
 
-            // Second pass: the app that was foreground when the overlay opened
-            // often has no cached snapshot on first query. Retry once after the
-            // system has had time to snapshot it in the background. Only the
-            // rows that gained a bitmap rebind (no full-strip blink).
-            if (queriedTasks.any { it.previewBitmap == null && it.taskId > 0 && !it.isCurrentTask }) {
-                val refreshed = TaskManager.refreshMissingPreviews(queriedTasks)
-                if (refreshed.any { it.previewBitmap != null }) {
-                    taskAdapter.updatePreviewsIfGained(refreshed)
-                    tasks.clear()
-                    tasks.addAll(refreshed)
-                    binding.rvTasks.post { updateXmbTransforms() }
+            // Immediate background pass for any off-screen cards (index >= 4) whose snapshots
+            // weren't cached yet, so the strip opens instantly without waiting on all 30 tasks.
+            if (currentTasks.any { it.previewBitmap == null && it.taskId > 0 && !it.isCurrentTask }) {
+                currentTasks = TaskManager.loadMissingSnapshots(currentTasks)
+                applyRefreshedTaskPreviews(currentTasks)
+            }
+
+            // Second pass after 600ms: the app that was foreground when the overlay opened
+            // may need a moment for the system to write its snapshot in the background.
+            if (currentTasks.any { it.previewBitmap == null && it.taskId > 0 && !it.isCurrentTask }) {
+                val refreshed = TaskManager.refreshMissingPreviews(currentTasks)
+                applyRefreshedTaskPreviews(refreshed)
+            }
+        }
+    }
+
+    private fun applyRefreshedTaskPreviews(refreshed: List<DeckTask>) {
+        if (refreshed.none { it.previewBitmap != null }) return
+        taskAdapter.updatePreviewsIfGained(refreshed)
+        val byId = refreshed.associateBy { it.taskId }
+        for (i in tasks.indices) {
+            val cur = tasks[i]
+            if (!cur.isCurrentTask && cur.previewBitmap == null) {
+                val updated = byId[cur.taskId]
+                if (updated?.previewBitmap != null) {
+                    tasks[i] = cur.copy(previewBitmap = updated.previewBitmap)
                 }
             }
         }
+        binding.rvTasks.post { updateXmbTransforms() }
     }
 
     private fun getEntranceStartY(): Float {

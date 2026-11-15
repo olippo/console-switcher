@@ -104,7 +104,6 @@ class DeckControlAdapter(
     inner class ControlViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val cardContainer: CardView? = itemView.findViewById(R.id.cardContainer)
         val cardInnerLayout: View? = itemView.findViewById(R.id.cardInnerLayout)
-        val borderOverlay: View? = itemView.findViewById(R.id.vBorder)
         val ivControlCardIcon: ImageView? = itemView.findViewById(R.id.ivControlCardIcon)
         val labelRow: View? = itemView.findViewById(R.id.labelRow)
         val tvControlTitle: TextView? = itemView.findViewById(R.id.tvControlTitle)
@@ -160,7 +159,6 @@ class DeckControlAdapter(
                 }
             }
             cardInnerLayout?.background = combinedDrawable
-            borderOverlay?.background = null
 
             labelRow?.animate()?.cancel()
             if (isFocused) {

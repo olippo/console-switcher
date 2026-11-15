@@ -47,24 +47,21 @@ class DeckTaskAdapter(
      * would visibly blink the whole strip; targeted updates don't.
      */
     fun updatePreviewsIfGained(newTasks: List<DeckTask>) {
-        if (newTasks.size != tasks.size) {
-            updateTasks(newTasks)
-            return
-        }
-        val oldTasks = tasks
-        this.tasks = newTasks.toList()
-        if (selectedPosition >= tasks.size) {
-            selectedPosition = (tasks.size - 1).coerceAtLeast(0)
-        }
-        for (i in tasks.indices) {
-            // refreshMissingPreviews copies only rows that gained a bitmap;
-            // untouched rows keep their instance: rebind just the new ones.
-            val old = oldTasks.getOrNull(i)
-            val new = newTasks[i]
-            if (new.isCurrentTask) continue
-            if (new !== old && new.previewBitmap != null && old?.previewBitmap == null) {
+        val byId = newTasks.associateBy { it.taskId }
+        val updated = tasks.toMutableList()
+        var changed = false
+        for (i in updated.indices) {
+            val current = updated[i]
+            if (current.isCurrentTask || current.previewBitmap != null) continue
+            val refreshed = byId[current.taskId]
+            if (refreshed?.previewBitmap != null) {
+                updated[i] = current.copy(previewBitmap = refreshed.previewBitmap)
+                changed = true
                 notifyItemChanged(i, PAYLOAD_PREVIEW)
             }
+        }
+        if (changed) {
+            this.tasks = updated
         }
     }
 

@@ -9,7 +9,6 @@ data class BluetoothDeviceItem(
     val isConnected: Boolean,
     val isBusy: Boolean = false,
     val hasError: Boolean = false,
-    val statusText: String,
     @param:DrawableRes val iconRes: Int,
     val device: BluetoothDevice? = null,
     val networkId: Int = -1,

@@ -23,10 +23,22 @@ import com.example.consoleswitcher3.model.DeckTask
 import com.example.consoleswitcher3.shizuku.ShizukuManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 object TaskManager {
     private const val TAG = "TaskManager"
+    private const val INITIAL_SYNC_SNAPSHOT_LIMIT = 4
+
+    private data class CachedAppDetails(
+        val label: String,
+        val iconBitmap: Bitmap?
+    )
+
+    private val appDetailsCache = ConcurrentHashMap<String, CachedAppDetails>()
+    private val snapshotCache = ConcurrentHashMap<Int, Bitmap>()
+    @Volatile
+    private var lastForegroundTaskId: Int = -1
 
     /**
      * Queries currently open and recent tasks on the device.
@@ -135,6 +147,7 @@ object TaskManager {
         val pm = context.packageManager
         val result = mutableListOf<DeckTask>()
         val seenPackages = mutableSetOf<String>()
+        val activeTaskIds = mutableSetOf<Int>()
 
         var currentRunningTaskId: Int? = null
 
@@ -262,9 +275,10 @@ object TaskManager {
                 if (isHomeOrLauncher(targetPackage, label, homePackages)) continue
 
                 seenPackages.add(targetPackage)
+                activeTaskIds.add(taskId)
 
                 val isCurrent = (currentRunningTaskId != null && currentRunningTaskId > 0 && taskId == currentRunningTaskId)
-                val previewBitmap = if (isCurrent) null else getTaskSnapshotBitmap(atm, taskId)
+                val previewBitmap = resolveTaskPreviewBitmap(atm, taskId, result.size, isCurrent)
 
                 result.add(
                     DeckTask(
@@ -282,7 +296,34 @@ object TaskManager {
                 Log.w(TAG, "Error parsing TaskInfo item", e)
             }
         }
+        snapshotCache.keys.retainAll(activeTaskIds)
+        lastForegroundTaskId = currentRunningTaskId ?: -1
         return result
+    }
+
+    private fun resolveTaskPreviewBitmap(
+        atm: Any?,
+        taskId: Int,
+        index: Int,
+        isCurrent: Boolean
+    ): Bitmap? {
+        if (isCurrent) {
+            snapshotCache.remove(taskId)
+            return null
+        }
+        if (taskId == lastForegroundTaskId || index < 2) {
+            snapshotCache.remove(taskId)
+        }
+        val cachedSnapshot = snapshotCache[taskId]?.takeIf { !it.isRecycled }
+        if (cachedSnapshot != null) {
+            return cachedSnapshot
+        }
+        if (index >= INITIAL_SYNC_SNAPSHOT_LIMIT || atm == null) {
+            return null
+        }
+        return getTaskSnapshotBitmap(atm, taskId)?.also { bmp ->
+            snapshotCache[taskId] = bmp
+        }
     }
 
     /**
@@ -425,6 +466,14 @@ object TaskManager {
     }
 
     /**
+     * Immediately loads missing snapshots for off-screen cards (index >= INITIAL_SYNC_SNAPSHOT_LIMIT)
+     * in the background right after the task strip renders.
+     */
+    suspend fun loadMissingSnapshots(tasks: List<DeckTask>): List<DeckTask> = withContext(Dispatchers.IO) {
+        fetchMissingSnapshotsInternal(tasks)
+    }
+
+    /**
      * Re-tries snapshots for tasks that came back without a preview.
      * The task that was foreground when the overlay opened often has no
      * cached snapshot yet — it appears a few hundred ms after backgrounding.
@@ -435,14 +484,21 @@ object TaskManager {
         try {
             kotlinx.coroutines.delay(600)
         } catch (ignored: Throwable) {}
-        try {
-            val binder = ShizukuManager.getSystemServiceBinder("activity_task") ?: return@withContext tasks
+        fetchMissingSnapshotsInternal(tasks)
+    }
+
+    private fun fetchMissingSnapshotsInternal(tasks: List<DeckTask>): List<DeckTask> {
+        if (tasks.none { it.previewBitmap == null && it.taskId > 0 && !it.isCurrentTask }) return tasks
+        return try {
+            val binder = ShizukuManager.getSystemServiceBinder("activity_task") ?: return tasks
             val stubClass = Class.forName("android.app.IActivityTaskManager\$Stub")
             val atm = stubClass.getMethod("asInterface", IBinder::class.java).invoke(null, binder)
-                ?: return@withContext tasks
+                ?: return tasks
             tasks.map { task ->
                 if (task.previewBitmap == null && task.taskId > 0 && !task.isCurrentTask) {
-                    val bmp = getTaskSnapshotBitmap(atm, task.taskId)
+                    val bmp = getTaskSnapshotBitmap(atm, task.taskId)?.also {
+                        snapshotCache[task.taskId] = it
+                    }
                     if (bmp != null) task.copy(previewBitmap = bmp) else task
                 } else task
             }
@@ -467,6 +523,7 @@ object TaskManager {
         val pm = context.packageManager
         val list = mutableListOf<DeckTask>()
         val seenPackages = mutableSetOf<String>()
+        val activeTaskIds = mutableSetOf<Int>()
 
         // Line pattern: * Recent #0: Task{41ea720 #32 type=standard I=com.example.app/...}
         val pattern = Pattern.compile("\\*\\s+Recent\\s+#\\d+:\\s+Task\\{[0-9a-fA-F]+\\s+#(\\d+)\\s+.*?I=([^/\\s\\}]+)(?:/([^\\s\\}]+))?")
@@ -528,9 +585,10 @@ object TaskManager {
                 if (isHomeOrLauncher(pkg, label, homePackages)) continue
 
                 seenPackages.add(pkg)
+                activeTaskIds.add(taskId)
 
                 val isCurrent = (currentRunningTaskId != null && currentRunningTaskId > 0 && taskId == currentRunningTaskId)
-                val preview = if (isCurrent) null else (if (atm != null) getTaskSnapshotBitmap(atm, taskId) else null)
+                val preview = resolveTaskPreviewBitmap(atm, taskId, list.size, isCurrent)
 
                 list.add(
                     DeckTask(
@@ -548,6 +606,8 @@ object TaskManager {
                 Log.w(TAG, "Error parsing dumpsys line", e)
             }
         }
+        snapshotCache.keys.retainAll(activeTaskIds)
+        lastForegroundTaskId = currentRunningTaskId ?: -1
         return list
     }
 
@@ -556,23 +616,28 @@ object TaskManager {
         pm: PackageManager,
         packageName: String
     ): Pair<String, Drawable?> {
+        appDetailsCache[packageName]?.let { cached ->
+            val drawable = cached.iconBitmap?.takeIf { !it.isRecycled }?.let {
+                BitmapDrawable(context.resources, it)
+            }
+            if (drawable != null || cached.iconBitmap == null) {
+                return Pair(cached.label, drawable)
+            }
+        }
         return try {
             val appInfo = pm.getApplicationInfo(packageName, 0)
             val label = pm.getApplicationLabel(appInfo).toString()
             val rawIcon = pm.getApplicationIcon(appInfo)
-            val icon = rasterizeIcon(context, rawIcon)
-            Pair(label, icon)
+            val iconBitmap = rasterizeIconBitmap(context, rawIcon)
+            appDetailsCache[packageName] = CachedAppDetails(label, iconBitmap)
+            val iconDrawable = iconBitmap?.let { BitmapDrawable(context.resources, it) } ?: rawIcon
+            Pair(label, iconDrawable)
         } catch (e: Throwable) {
             Pair(packageName, null)
         }
     }
 
-    /**
-     * Pre-rasterizes any Drawable (AdaptiveIconDrawable, VectorDrawable, etc.) into
-     * a clean, static BitmapDrawable once on Dispatchers.IO.
-     * Prevents UI-thread path evaluation, adaptive mask recalculation, and bounds thrashing.
-     */
-    fun rasterizeIcon(context: Context, rawIcon: Drawable?, sizeDp: Int = 96): Drawable? {
+    private fun rasterizeIconBitmap(context: Context, rawIcon: Drawable?, sizeDp: Int = 96): Bitmap? {
         if (rawIcon == null) return null
         return try {
             val density = context.resources.displayMetrics.density
@@ -583,11 +648,21 @@ object TaskManager {
             rawIcon.setBounds(0, 0, sizePx, sizePx)
             rawIcon.draw(canvas)
             rawIcon.bounds = oldBounds
-            BitmapDrawable(context.resources, bitmap)
+            bitmap
         } catch (e: Throwable) {
             Log.w(TAG, "Failed to rasterize app icon", e)
-            rawIcon
+            null
         }
+    }
+
+    /**
+     * Pre-rasterizes any Drawable (AdaptiveIconDrawable, VectorDrawable, etc.) into
+     * a clean, static BitmapDrawable once on Dispatchers.IO.
+     * Prevents UI-thread path evaluation, adaptive mask recalculation, and bounds thrashing.
+     */
+    fun rasterizeIcon(context: Context, rawIcon: Drawable?, sizeDp: Int = 96): Drawable? {
+        val bmp = rasterizeIconBitmap(context, rawIcon, sizeDp) ?: return rawIcon
+        return BitmapDrawable(context.resources, bmp)
     }
 
     /**
@@ -684,6 +759,7 @@ object TaskManager {
      * Force stops / kills the specified task.
      */
     suspend fun killTask(context: Context, task: DeckTask): Boolean = withContext(Dispatchers.IO) {
+        snapshotCache.remove(task.taskId)
         var success = false
         if (ShizukuManager.hasShizukuPermission()) {
             // Remove task from recents

@@ -57,7 +57,6 @@ class BluetoothDeviceAdapter(
                         oldItem.isConnected == newItem.isConnected &&
                         oldItem.isBusy == newItem.isBusy &&
                         oldItem.hasError == newItem.hasError &&
-                        oldItem.statusText == newItem.statusText &&
                         oldItem.iconRes == newItem.iconRes
             }
         })
@@ -102,10 +101,8 @@ class BluetoothDeviceAdapter(
         private val itemRoot: View = itemView.findViewById(R.id.itemRoot)
         private val ivDeviceIcon: ImageView = itemView.findViewById(R.id.ivDeviceIcon)
         private val tvDeviceName: TextView = itemView.findViewById(R.id.tvDeviceName)
-        private val tvDeviceStatus: TextView = itemView.findViewById(R.id.tvDeviceStatus)
         private val ivDeviceStatusCheck: ImageView = itemView.findViewById(R.id.ivDeviceStatusCheck)
         private val pbDeviceLoading: ProgressBar = itemView.findViewById(R.id.pbDeviceLoading)
-        private val vItemBorder: View = itemView.findViewById(R.id.vItemBorder)
 
         fun bind(item: BluetoothDeviceItem, isSelected: Boolean) {
             val context = itemView.context
@@ -147,9 +144,6 @@ class BluetoothDeviceAdapter(
             if (ivDeviceStatusCheck.visibility != targetStatusIconVisibility) {
                 ivDeviceStatusCheck.visibility = targetStatusIconVisibility
             }
-            if (tvDeviceStatus.visibility != View.GONE) {
-                tvDeviceStatus.visibility = View.GONE
-            }
 
             if (isSelected) {
                 val borderWidthDp = OverlayPrefs.getBorderWidthDp(context).coerceIn(1.5f, 3.0f)
@@ -164,7 +158,6 @@ class BluetoothDeviceAdapter(
             } else {
                 itemRoot.background = null
             }
-            vItemBorder.background = null
         }
     }
 }

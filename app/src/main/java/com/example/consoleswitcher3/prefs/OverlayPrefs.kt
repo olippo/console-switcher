@@ -10,20 +10,17 @@ object OverlayPrefs {
     private const val FILE = "consoleswitcher"
     const val KEY_ANIM_SPEED = "nav_anim_speed_v4"
     const val KEY_CLOSE_ANIM_SPEED = "close_anim_speed_v1"
-    const val KEY_SLIDE_DELAY = "slide_delay_ms_v1"
     const val KEY_SIDE_SCALE = "side_scale"
     const val KEY_CARD_GAP = "card_gap"
     const val KEY_BOTTOM_GAP = "bottom_gap"
     const val KEY_BG_COLOR = "bg_color"
     const val KEY_BG_OPACITY = "bg_opacity"
-    const val KEY_BG_GRADIENT_HEIGHT = "bg_gradient_height"
     const val KEY_BORDER_COLOR = "border_color"
     const val KEY_BORDER_WIDTH = "border_width"
     const val KEY_CARD_BG = "card_bg"
     const val KEY_CARD_FOCUSED_BG = "card_focused_bg"
     const val KEY_CARD_BORDER = "card_border"
     const val KEY_CARD_CORNER_RADIUS = "card_corner_radius"
-    const val KEY_PREVIEW_BG = "preview_bg"
     const val KEY_CONTROL_PANEL_ITEMS = "control_panel_items_v1"
 
     data class ControlItemConfig(
@@ -67,19 +64,11 @@ object OverlayPrefs {
     /** Close animation constants */
     const val DEFAULT_CLOSE_SPEED = 1.0f
     const val MIN_CLOSE_SPEED = 0.5f
-    const val MAX_CLOSE_SPEED = 1.5f
     const val OFF_CLOSE_SPEED = 1.75f
 
     /** Slide delay: hardcoded to 70ms. */
-    const val DEFAULT_SLIDE_DELAY_MS = 70f
     const val HARDCODED_SLIDE_DELAY_MS = 70f
 
-    // Compatibility aliases
-    const val DEFAULT_SPEED = DEFAULT_NAV_SPEED
-    const val MIN_SPEED = MIN_NAV_SPEED
-    const val MAX_SPEED = MAX_NAV_SPEED
-    const val OFF_SPEED = OFF_NAV_SPEED
-    const val SPEED_UNIT = NAV_SPEED_UNIT
     /** Scale of non-centered cards. 1.0 = no shrink.
      *  Must be a valid step of sliderSideScale (valueFrom=0.2, step=0.05).
      *  0.75 is the nearest valid value; 0.74 is NOT a multiple of 0.05 from 0.2. */
@@ -111,9 +100,6 @@ object OverlayPrefs {
 
     fun defaultCardBorder(context: Context): Int =
         ContextCompat.getColor(context, R.color.deck_card_border)
-
-    fun defaultPreviewBg(context: Context): Int =
-        ContextCompat.getColor(context, R.color.deck_preview_bg)
 
     fun getAnimSpeed(context: Context): Float {
         return try {
@@ -167,14 +153,6 @@ object OverlayPrefs {
         return HARDCODED_SLIDE_DELAY_MS
     }
 
-    fun setSlideDelayMs(context: Context, delayMs: Float) {
-        // Hardcoded to 70ms
-    }
-
-    fun slideDelayLabel(delayMs: Float): String {
-        return if (delayMs <= 0f) "Instant" else "${delayMs.toInt()} ms"
-    }
-
     /** Final slider detent past 1.5x (1.75x): skip animation, jump to the card. */
     fun isAnimOff(speed: Float): Boolean = speed >= 1.6f
 
@@ -222,8 +200,6 @@ object OverlayPrefs {
         }
         return "$formatted — $label"
     }
-
-    fun speedLabel(speed: Float): String = navSpeedLabel(speed)
 
     fun getSideScale(context: Context): Float {
         return try {
@@ -354,10 +330,6 @@ object OverlayPrefs {
         return DEFAULT_BG_GRADIENT_HEIGHT
     }
 
-    fun setBgGradientHeightDp(context: Context, heightDp: Float) {
-        // Hardcoded to 300dp
-    }
-
     /** Top of the bottom scrim: same RGB as base, fully transparent. */
     fun bgGradientTopColor(context: Context): Int {
         return getBgColor(context) and 0x00FFFFFF
@@ -419,9 +391,8 @@ object OverlayPrefs {
     fun getCardBg(context: Context): Int {
         return try {
             val defaultColor = defaultCardBg(context)
-            val color = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .getInt(KEY_CARD_BG, defaultColor)
-            if (color == 0xFF151E2B.toInt()) defaultColor else color
         } catch (ignored: Throwable) {
             defaultCardBg(context)
         }
@@ -440,9 +411,8 @@ object OverlayPrefs {
     fun getCardFocusedBg(context: Context): Int {
         return try {
             val defaultColor = defaultCardFocusedBg(context)
-            val color = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .getInt(KEY_CARD_FOCUSED_BG, defaultColor)
-            if (color == 0xFF1C283B.toInt() || color == 0xFF151E2B.toInt()) defaultColor else color
         } catch (ignored: Throwable) {
             defaultCardFocusedBg(context)
         }
@@ -498,24 +468,6 @@ object OverlayPrefs {
         } catch (ignored: Throwable) {}
     }
 
-    fun getPreviewBg(context: Context): Int {
-        return try {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .getInt(KEY_PREVIEW_BG, defaultPreviewBg(context))
-        } catch (ignored: Throwable) {
-            defaultPreviewBg(context)
-        }
-    }
-
-    fun setPreviewBg(context: Context, color: Int) {
-        try {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-                .edit()
-                .putInt(KEY_PREVIEW_BG, color)
-                .apply()
-        } catch (ignored: Throwable) {}
-    }
-
     fun resetColorsToDefaults(context: Context) {
         setBorderColor(context, defaultBorderColor(context))
         setCardBorder(context, defaultCardBorder(context))
@@ -524,7 +476,6 @@ object OverlayPrefs {
         setBgColor(context, defaultBgColor(context))
         setCardBg(context, defaultCardBg(context))
         setCardFocusedBg(context, defaultCardFocusedBg(context))
-        setPreviewBg(context, defaultPreviewBg(context))
     }
 
     /** "#RRGGBB" (opaque) or "#AARRGGBB" when alpha != FF. */

@@ -59,23 +59,6 @@
             android:visibility="gone"
             tools:visibility="visible" />
 
-        <TextView
-            android:id="@+id/tvDeviceStatus"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:fontFamily="sans-serif-medium"
-            android:textColor="@color/deck_text_secondary"
-            android:textSize="13sp"
-            android:visibility="gone"
-            tools:text="Connected" />
-
     </LinearLayout>
-
-    <View
-        android:id="@+id/vItemBorder"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:clickable="false"
-        android:focusable="false" />
 
 </FrameLayout>
