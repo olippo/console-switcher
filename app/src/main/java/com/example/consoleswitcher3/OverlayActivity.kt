@@ -58,6 +58,7 @@ import androidx.recyclerview.widget.LinearSmoothScroller
 import androidx.recyclerview.widget.RecyclerView
 import com.example.consoleswitcher3.controller.GamepadInputHelper
 import com.example.consoleswitcher3.databinding.ActivityOverlayBinding
+import com.example.consoleswitcher3.handheld.HandheldController
 import com.example.consoleswitcher3.model.BluetoothDeviceItem
 import com.example.consoleswitcher3.model.ControlCard
 import com.example.consoleswitcher3.model.DeckTask
@@ -85,7 +86,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private enum class ActiveControlModal {
         NONE,
         BLUETOOTH,
-        WIFI
+        WIFI,
+        HANDHELD_MODE
     }
 
     private lateinit var binding: ActivityOverlayBinding
@@ -100,12 +102,15 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private var currentMode: OverlayMode = OverlayMode.APP_SWITCHER
     private var isTransitioningMode: Boolean = false
     private var activeControlModal: ActiveControlModal = ActiveControlModal.NONE
+    private var activeHandheldModalControlId: String? = null
     private val isControlModalOpen: Boolean
         get() = activeControlModal != ActiveControlModal.NONE
     private val isBluetoothMenuOpen: Boolean
         get() = activeControlModal == ActiveControlModal.BLUETOOTH
     private val isWifiMenuOpen: Boolean
         get() = activeControlModal == ActiveControlModal.WIFI
+    private val isHandheldModalOpen: Boolean
+        get() = activeControlModal == ActiveControlModal.HANDHELD_MODE
 
     private val busyBluetoothAddresses = mutableMapOf<String, String>()
     private val busyBluetoothTimestamps = mutableMapOf<String, Long>()
@@ -1072,22 +1077,57 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private fun buildControlCards(): List<ControlCard> {
         val enabledIds = com.example.consoleswitcher3.prefs.OverlayPrefs.getEnabledControlPanelIds(this)
         return enabledIds.map { id ->
-            val state = when (id) {
-                "wifi" -> isWifiEnabled()
-                "bluetooth" -> isBluetoothEnabled()
-                "dnd" -> isDndEnabled()
-                "dark_mode" -> isDarkModeEnabled()
-                "rotation" -> isRotationAutoEnabled()
-                "battery_saver" -> isBatterySaverEnabled()
-                "night_light" -> isNightLightEnabled()
-                "screen_record" -> com.example.consoleswitcher3.shizuku.ScreenRecordHelper.isRecording
-                "airplane" -> isAirplaneModeEnabled()
-                "screen_timeout" -> isScreenTimeoutKeepAwake()
-                "screenshot" -> true
-                else -> false
+            if (HandheldController.isHandheldControl(id)) {
+                buildHandheldControlCard(id, HandheldController.readCurrentValue(this, id))
+            } else {
+                val state = when (id) {
+                    "wifi" -> isWifiEnabled()
+                    "bluetooth" -> isBluetoothEnabled()
+                    "dnd" -> isDndEnabled()
+                    "dark_mode" -> isDarkModeEnabled()
+                    "rotation" -> isRotationAutoEnabled()
+                    "battery_saver" -> isBatterySaverEnabled()
+                    "night_light" -> isNightLightEnabled()
+                    "screen_record" -> com.example.consoleswitcher3.shizuku.ScreenRecordHelper.isRecording
+                    "airplane" -> isAirplaneModeEnabled()
+                    "screen_timeout" -> isScreenTimeoutKeepAwake()
+                    "screenshot" -> true
+                    else -> false
+                }
+                buildControlCardForState(id, state)
             }
-            buildControlCardForState(id, state)
         }
+    }
+
+    private fun getHandheldModeIconRes(id: String, value: Int): Int {
+        if (id == HandheldController.ID_PERF_MODE) {
+            return when (value) {
+                0 -> R.drawable.ic_directions_walk_rounded
+                1 -> R.drawable.ic_directions_run_rounded
+                2 -> R.drawable.ic_sprint_rounded
+                else -> R.drawable.ic_directions_walk_rounded
+            }
+        }
+        if (id == HandheldController.ID_FAN_MODE) {
+            return if (value == 0) R.drawable.ic_mode_fan_off_rounded else R.drawable.ic_mode_fan_rounded
+        }
+        return when (id) {
+            HandheldController.ID_JOYSTICK_LED -> R.drawable.ic_joystick_rounded
+            HandheldController.ID_BYPASS_CHARGING -> R.drawable.ic_power_plug_rounded
+            HandheldController.ID_CONTROLLER_STYLE -> R.drawable.ic_gamepad_rounded
+            HandheldController.ID_TRIGGER_MODE -> R.drawable.ic_game_button_r2_rounded
+            else -> com.example.consoleswitcher3.prefs.OverlayPrefs.controlItemIconRes(id)
+        }
+    }
+
+    private fun buildHandheldControlCard(id: String, value: Int): ControlCard {
+        val (title, isActive) = HandheldController.resolveCardState(id, value)
+        return ControlCard(
+            id = id,
+            title = title,
+            cardIconRes = getHandheldModeIconRes(id, value),
+            isEnabled = isActive
+        )
     }
 
     private fun buildControlCardForState(id: String, enabled: Boolean): ControlCard {
@@ -1442,8 +1482,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 toggleScreenRecordAction()
             }
             else -> {
-                // If it's just a toggle and not a menu, have the same function as X
-                toggleControlCardAt(position)
+                if (HandheldController.isMultiModeControl(currentCard.id)) {
+                    triggerHaptic()
+                    animateCardPress(position)
+                    openHandheldModeModal(currentCard.id)
+                } else {
+                    // If it's just a toggle and not a menu, have the same function as X
+                    toggleControlCardAt(position)
+                }
             }
         }
     }
@@ -1461,6 +1507,14 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             triggerHaptic()
             animateCardPress(position)
             toggleScreenRecordAction()
+            return
+        }
+        if (HandheldController.isHandheldControl(currentCard.id)) {
+            val currentValue = HandheldController.readCurrentValue(this, currentCard.id)
+            val targetValue = HandheldController.nextCycleValue(currentCard.id, currentValue)
+            triggerHaptic()
+            animateCardPress(position)
+            applyHandheldControlValueAt(position, currentCard.id, targetValue)
             return
         }
         val targetState = !currentCard.isEnabled
@@ -1530,7 +1584,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             items = emptyList(),
             onItemClick = { _, item ->
                 triggerHaptic()
-                if (isWifiMenuOpen) {
+                if (isHandheldModalOpen) {
+                    handleHandheldModalItemAction(item)
+                } else if (isWifiMenuOpen) {
                     handleWifiNetworkItemAction(item)
                 } else {
                     handleBluetoothDeviceItemAction(item)
@@ -1687,6 +1743,20 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         animateOpenControlModal()
     }
 
+    private fun openHandheldModeModal(controlId: String) {
+        if (isHandheldModalOpen && activeHandheldModalControlId == controlId) return
+        activeControlModal = ActiveControlModal.HANDHELD_MODE
+        activeHandheldModalControlId = controlId
+
+        applyBluetoothModalStyling()
+        val options = HandheldController.getModeOptions(controlId)
+        val currentValue = HandheldController.readCurrentValue(this, controlId)
+        val currentIdx = options.indexOfFirst { it.value == currentValue }.takeIf { it >= 0 } ?: 0
+        bluetoothDeviceAdapter.selectedPosition = currentIdx
+        refreshHandheldModalUi()
+        animateOpenControlModal()
+    }
+
     private fun animateOpenControlModal() {
         val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
         val closeSpeed = prefs.getCloseAnimSpeed(this)
@@ -1738,6 +1808,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private fun closeControlModal() {
         if (!isControlModalOpen) return
         activeControlModal = ActiveControlModal.NONE
+        activeHandheldModalControlId = null
         errorBluetoothAddresses.clear()
         errorWifiNetworks.clear()
         triggerHaptic()
@@ -1811,6 +1882,86 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 }
             }, 150L)
             refreshWifiMenuUi()
+        }
+    }
+
+    private fun refreshHandheldModalUi() {
+        val controlId = activeHandheldModalControlId ?: return
+        val currentValue = HandheldController.readCurrentValue(this, controlId)
+        val items = HandheldController.getModeOptions(controlId).map { option ->
+            BluetoothDeviceItem(
+                address = "handheld:$controlId:${option.value}",
+                name = option.label,
+                isConnected = option.value == currentValue,
+                isBusy = false,
+                hasError = false,
+                iconRes = getHandheldModeIconRes(controlId, option.value),
+                device = null,
+                networkId = option.value,
+                isSettingsAction = false
+            )
+        }
+        bluetoothDeviceAdapter.updateDevices(items)
+        if (items.isNotEmpty()) {
+            bluetoothDeviceAdapter.selectedPosition =
+                bluetoothDeviceAdapter.selectedPosition.coerceIn(0, items.lastIndex)
+        }
+        binding.tvBluetoothEmpty.visibility = View.GONE
+        binding.rvBluetoothDevices.visibility = View.VISIBLE
+    }
+
+    private fun handleSelectedHandheldModalAction() {
+        val selected = bluetoothDeviceAdapter.getSelectedDevice() ?: return
+        handleHandheldModalItemAction(selected)
+    }
+
+    private fun handleHandheldModalItemAction(item: BluetoothDeviceItem) {
+        val controlId = activeHandheldModalControlId ?: return
+        val targetValue = item.networkId
+        val pos = controlCards.indexOfFirst { it.id == controlId }
+        applyHandheldControlValueAt(pos, controlId, targetValue)
+        closeControlModal()
+    }
+
+    private fun cycleHandheldModalOption() {
+        val controlId = activeHandheldModalControlId ?: return
+        val currentValue = HandheldController.readCurrentValue(this, controlId)
+        val targetValue = HandheldController.nextCycleValue(controlId, currentValue)
+        triggerHaptic()
+        val options = HandheldController.getModeOptions(controlId)
+        val targetIdx = options.indexOfFirst { it.value == targetValue }
+        if (targetIdx >= 0) {
+            bluetoothDeviceAdapter.selectedPosition = targetIdx
+            binding.rvBluetoothDevices.scrollToPosition(targetIdx)
+        }
+        val pos = controlCards.indexOfFirst { it.id == controlId }
+        applyHandheldControlValueAt(pos, controlId, targetValue)
+        refreshHandheldModalUi()
+    }
+
+    private fun applyHandheldControlValueAt(position: Int, id: String, targetValue: Int) {
+        HandheldController.setPendingValue(id, targetValue)
+        if (position in controlCards.indices) {
+            val optimisticCard = buildHandheldControlCard(id, targetValue)
+            controlCards[position] = optimisticCard
+            controlAdapter.updateCardAt(position, optimisticCard)
+        }
+        lifecycleScope.launch {
+            val handled = withContext(Dispatchers.IO) {
+                HandheldController.applyValue(this@OverlayActivity, id, targetValue)
+            }
+            if (!handled) {
+                applyControlFallbackOnMain(id, targetValue != 0)
+            }
+            val checkDelays = listOf(300L, 800L, 1500L)
+            for (checkDelay in checkDelays) {
+                delay(checkDelay)
+                if (isFinishing || isDestroyed) break
+                refreshControlCards()
+                if (isHandheldModalOpen && activeHandheldModalControlId == id) {
+                    refreshHandheldModalUi()
+                }
+            }
         }
     }
 
@@ -1979,7 +2130,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         if (!enabled) {
             bluetoothDeviceAdapter.updateDevices(emptyList())
-            binding.rvBluetoothDevices.visibility = View.INVISIBLE
+            binding.rvBluetoothDevices.visibility = View.GONE
             binding.tvBluetoothEmpty.visibility = View.VISIBLE
             binding.tvBluetoothEmpty.text = "Bluetooth is turned off\nPress (X) to turn on"
             return
@@ -1987,7 +2138,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         if (!hasBluetoothRuntimePermission()) {
             bluetoothDeviceAdapter.updateDevices(emptyList())
-            binding.rvBluetoothDevices.visibility = View.INVISIBLE
+            binding.rvBluetoothDevices.visibility = View.GONE
             binding.tvBluetoothEmpty.visibility = View.VISIBLE
             binding.tvBluetoothEmpty.text = "Bluetooth permission required\nPress (A) to grant"
             return
@@ -2589,7 +2740,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         if (!enabled) {
             bluetoothDeviceAdapter.updateDevices(emptyList())
-            binding.rvBluetoothDevices.visibility = View.INVISIBLE
+            binding.rvBluetoothDevices.visibility = View.GONE
             binding.tvBluetoothEmpty.visibility = View.VISIBLE
             binding.tvBluetoothEmpty.text = "Wi-Fi is turned off\nPress (X) to turn on"
             return
@@ -3039,6 +3190,24 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun applyControlFallbackOnMain(id: String, enable: Boolean) {
+        if (HandheldController.isHandheldControl(id)) {
+            try {
+                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(this)) {
+                    Intent(
+                        Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                } else {
+                    packageManager.getLaunchIntentForPackage("com.rp.settings")
+                        ?: Intent(Settings.ACTION_SETTINGS)
+                }
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Handheld fallback failed for $id: ${e.message}")
+            }
+            return
+        }
         try {
             val intent = when (id) {
                 "wifi" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -4300,6 +4469,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         } else if (isWifiMenuOpen) {
             applyBluetoothModalStyling()
             refreshWifiMenuUi()
+        } else if (isHandheldModalOpen) {
+            applyBluetoothModalStyling()
+            refreshHandheldModalUi()
         }
     }
 
@@ -4755,6 +4927,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             handleSelectedWifiNetworkAction()
             return
         }
+        if (isHandheldModalOpen) {
+            handleSelectedHandheldModalAction()
+            return
+        }
         if (currentMode == OverlayMode.APP_SWITCHER) {
             switchSelectedTask()
         } else {
@@ -4781,6 +4957,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         }
         if (isWifiMenuOpen) {
             toggleWifiFromModal()
+            return
+        }
+        if (isHandheldModalOpen) {
+            cycleHandheldModalOption()
             return
         }
         if (currentMode == OverlayMode.APP_SWITCHER) {

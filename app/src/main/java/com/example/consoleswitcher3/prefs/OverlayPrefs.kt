@@ -5,6 +5,7 @@ import androidx.annotation.ColorRes
 import androidx.annotation.DrawableRes
 import androidx.core.content.ContextCompat
 import com.example.consoleswitcher3.R
+import com.example.consoleswitcher3.handheld.HandheldController
 
 object OverlayPrefs {
     private const val FILE = "consoleswitcher"
@@ -45,9 +46,12 @@ object OverlayPrefs {
         "screenshot"
     )
 
+    val HANDHELD_CONTROL_ITEMS: List<String> = HandheldController.HANDHELD_CONTROL_IDS
+
     val DEFAULT_CONTROL_ITEMS: List<String> = DEFAULT_VISIBLE_CONTROL_ITEMS + DEFAULT_HIDDEN_CONTROL_ITEMS
 
-    fun isItemEnabledByDefault(id: String): Boolean = id in DEFAULT_VISIBLE_CONTROL_ITEMS
+    fun isItemEnabledByDefault(id: String): Boolean =
+        id in DEFAULT_VISIBLE_CONTROL_ITEMS || id in HANDHELD_CONTROL_ITEMS
 
     /** 1.0 = default console navigation speed (matches former 0.5x). Higher = faster. */
     const val DEFAULT_NAV_SPEED = 1.0f
@@ -489,19 +493,25 @@ object OverlayPrefs {
     }
 
     fun getControlPanelItems(context: Context): List<ControlItemConfig> {
+        val includeHandheld = HandheldController.isMoorechipDevice(context)
         return try {
             val raw = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .getString(KEY_CONTROL_PANEL_ITEMS, null)
-            parseControlPanelItems(raw)
+            parseControlPanelItems(raw, includeHandheld)
         } catch (ignored: Throwable) {
-            DEFAULT_VISIBLE_CONTROL_ITEMS.map { ControlItemConfig(it, true) } +
+            val visibleDefaults = if (includeHandheld) {
+                DEFAULT_VISIBLE_CONTROL_ITEMS + HANDHELD_CONTROL_ITEMS
+            } else {
+                DEFAULT_VISIBLE_CONTROL_ITEMS
+            }
+            visibleDefaults.map { ControlItemConfig(it, true) } +
                 DEFAULT_HIDDEN_CONTROL_ITEMS.map { ControlItemConfig(it, false) }
         }
     }
 
     fun setControlPanelItems(context: Context, items: List<ControlItemConfig>) {
         try {
-            val serialized = serializeControlPanelItems(items)
+            val serialized = serializeControlPanelItems(items, HandheldController.isMoorechipDevice(context))
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_CONTROL_PANEL_ITEMS, serialized)
@@ -510,9 +520,14 @@ object OverlayPrefs {
     }
 
     fun resetControlPanelItems(context: Context) {
+        val visibleDefaults = if (HandheldController.isMoorechipDevice(context)) {
+            DEFAULT_VISIBLE_CONTROL_ITEMS + HANDHELD_CONTROL_ITEMS
+        } else {
+            DEFAULT_VISIBLE_CONTROL_ITEMS
+        }
         setControlPanelItems(
             context,
-            DEFAULT_VISIBLE_CONTROL_ITEMS.map { ControlItemConfig(it, true) } +
+            visibleDefaults.map { ControlItemConfig(it, true) } +
                 DEFAULT_HIDDEN_CONTROL_ITEMS.map { ControlItemConfig(it, false) }
         )
     }
@@ -521,8 +536,13 @@ object OverlayPrefs {
         return getControlPanelItems(context).filter { it.enabled }.map { it.id }
     }
 
-    fun parseControlPanelItems(raw: String?): List<ControlItemConfig> {
-        val validIds = DEFAULT_CONTROL_ITEMS.toSet()
+    fun parseControlPanelItems(raw: String?, includeHandheld: Boolean = false): List<ControlItemConfig> {
+        val allDefaults = if (includeHandheld) {
+            DEFAULT_VISIBLE_CONTROL_ITEMS + HANDHELD_CONTROL_ITEMS + DEFAULT_HIDDEN_CONTROL_ITEMS
+        } else {
+            DEFAULT_CONTROL_ITEMS
+        }
+        val validIds = allDefaults.toSet()
         val seen = mutableSetOf<String>()
         val enabledList = mutableListOf<ControlItemConfig>()
         val disabledList = mutableListOf<ControlItemConfig>()
@@ -542,7 +562,7 @@ object OverlayPrefs {
             }
         }
 
-        for (defaultId in DEFAULT_CONTROL_ITEMS) {
+        for (defaultId in allDefaults) {
             if (seen.add(defaultId)) {
                 val defaultEnabled = isItemEnabledByDefault(defaultId)
                 if (defaultEnabled) {
@@ -556,8 +576,13 @@ object OverlayPrefs {
         return enabledList + disabledList
     }
 
-    fun serializeControlPanelItems(items: List<ControlItemConfig>): String {
-        val validIds = DEFAULT_CONTROL_ITEMS.toSet()
+    fun serializeControlPanelItems(items: List<ControlItemConfig>, includeHandheld: Boolean = false): String {
+        val allDefaults = if (includeHandheld) {
+            DEFAULT_VISIBLE_CONTROL_ITEMS + HANDHELD_CONTROL_ITEMS + DEFAULT_HIDDEN_CONTROL_ITEMS
+        } else {
+            DEFAULT_CONTROL_ITEMS
+        }
+        val validIds = allDefaults.toSet()
         val seen = mutableSetOf<String>()
         val enabledList = mutableListOf<ControlItemConfig>()
         val disabledList = mutableListOf<ControlItemConfig>()
@@ -570,7 +595,7 @@ object OverlayPrefs {
                 disabledList.add(item)
             }
         }
-        for (defaultId in DEFAULT_CONTROL_ITEMS) {
+        for (defaultId in allDefaults) {
             if (seen.add(defaultId)) {
                 val defaultEnabled = isItemEnabledByDefault(defaultId)
                 if (defaultEnabled) {
@@ -596,6 +621,12 @@ object OverlayPrefs {
             "airplane" -> "Airplane Mode"
             "screen_timeout" -> "Prevent Sleep"
             "screenshot" -> "Screenshot"
+            HandheldController.ID_PERF_MODE -> "Performance Mode"
+            HandheldController.ID_FAN_MODE -> "Fan Mode"
+            HandheldController.ID_CONTROLLER_STYLE -> "Controller Style"
+            HandheldController.ID_TRIGGER_MODE -> "Trigger Mode"
+            HandheldController.ID_JOYSTICK_LED -> "Joystick LED"
+            HandheldController.ID_BYPASS_CHARGING -> "Charging Separation"
             else -> id
         }
     }
@@ -614,6 +645,12 @@ object OverlayPrefs {
             "airplane" -> R.drawable.ic_airplanemode_active_rounded
             "screen_timeout" -> R.drawable.ic_screen_timeout_rounded
             "screenshot" -> R.drawable.ic_screenshot_rounded
+            HandheldController.ID_PERF_MODE -> R.drawable.ic_directions_run_rounded
+            HandheldController.ID_FAN_MODE -> R.drawable.ic_mode_fan_rounded
+            HandheldController.ID_CONTROLLER_STYLE -> R.drawable.ic_gamepad_rounded
+            HandheldController.ID_TRIGGER_MODE -> R.drawable.ic_game_button_r2_rounded
+            HandheldController.ID_JOYSTICK_LED -> R.drawable.ic_joystick_rounded
+            HandheldController.ID_BYPASS_CHARGING -> R.drawable.ic_power_plug_rounded
             else -> R.drawable.ic_wifi_rounded
         }
     }
@@ -632,6 +669,12 @@ object OverlayPrefs {
             "airplane" -> R.color.orange
             "screen_timeout" -> R.color.white
             "screenshot" -> R.color.white
+            HandheldController.ID_PERF_MODE -> R.color.orange
+            HandheldController.ID_FAN_MODE -> R.color.blue
+            HandheldController.ID_CONTROLLER_STYLE -> R.color.green
+            HandheldController.ID_TRIGGER_MODE -> R.color.indigo
+            HandheldController.ID_JOYSTICK_LED -> R.color.yellow
+            HandheldController.ID_BYPASS_CHARGING -> R.color.green
             else -> null
         }
     }

@@ -216,7 +216,7 @@
     </LinearLayout>
 
     <!-- Custom Console Bluetooth Menu Modal -->
-    <FrameLayout
+    <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/bluetoothMenuOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -234,29 +234,36 @@
         <androidx.cardview.widget.CardView
             android:id="@+id/cardBluetoothModal"
             android:layout_width="400dp"
-            android:layout_height="240dp"
-            android:layout_gravity="center"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="36dp"
+            android:layout_marginBottom="36dp"
             android:clickable="true"
             android:focusable="false"
             android:focusableInTouchMode="false"
             app:cardBackgroundColor="@color/deck_card_bg"
             app:cardCornerRadius="8dp"
-            app:cardElevation="20dp">
+            app:cardElevation="20dp"
+            app:layout_constrainedHeight="true"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintHeight_max="252dp"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent">
 
             <FrameLayout
                 android:id="@+id/bluetoothModalInner"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent"
+                android:layout_height="wrap_content"
                 android:background="@color/deck_card_bg">
 
                 <FrameLayout
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent">
+                    android:layout_height="wrap_content">
 
                     <androidx.recyclerview.widget.RecyclerView
                         android:id="@+id/rvBluetoothDevices"
                         android:layout_width="match_parent"
-                        android:layout_height="match_parent"
+                        android:layout_height="wrap_content"
                         android:clipToPadding="false"
                         android:descendantFocusability="blocksDescendants"
                         android:focusable="false"
@@ -268,13 +275,16 @@
 
                     <TextView
                         android:id="@+id/tvBluetoothEmpty"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
                         android:fontFamily="sans-serif-medium"
                         android:gravity="center"
                         android:lineSpacingExtra="4dp"
-                        android:padding="24dp"
+                        android:paddingStart="24dp"
+                        android:paddingTop="28dp"
+                        android:paddingEnd="24dp"
+                        android:paddingBottom="28dp"
                         android:text="Bluetooth is turned off\nPress (X) to turn on"
                         android:textColor="@color/deck_text_secondary"
                         android:textSize="14sp"
@@ -284,11 +294,12 @@
                 <View
                     android:id="@+id/vBluetoothModalBorder"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
+                    android:layout_height="0dp"
                     android:clickable="false"
-                    android:focusable="false" />
+                    android:focusable="false"
+                    android:visibility="gone" />
             </FrameLayout>
         </androidx.cardview.widget.CardView>
-    </FrameLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

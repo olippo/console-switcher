@@ -219,4 +219,79 @@ class ConsoleSwitcherUnitTest {
         assertTrue(parsed[1].enabled)
         assertTrue(parsed.any { it.id == "wifi" && !it.enabled })
     }
+
+    @Test
+    fun testControlPanelItemsWithHandheld() {
+        val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
+        val handheldDefaults = prefs.parseControlPanelItems(null, includeHandheld = true)
+        assertEquals(17, handheldDefaults.size)
+
+        val visibleIds = handheldDefaults.filter { it.enabled }.map { it.id }
+        val hiddenIds = handheldDefaults.filter { !it.enabled }.map { it.id }
+        assertTrue(visibleIds.containsAll(com.example.consoleswitcher3.handheld.HandheldController.HANDHELD_CONTROL_IDS))
+        assertEquals(listOf("airplane", "screen_timeout", "screenshot"), hiddenIds)
+
+        val custom = listOf(
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("bypass_charging", true),
+            com.example.consoleswitcher3.prefs.OverlayPrefs.ControlItemConfig("fan_mode", false)
+        )
+        val serialized = prefs.serializeControlPanelItems(custom, includeHandheld = true)
+        val reparsedWithHandheld = prefs.parseControlPanelItems(serialized, includeHandheld = true)
+        assertEquals(17, reparsedWithHandheld.size)
+        assertEquals("bypass_charging", reparsedWithHandheld[0].id)
+        assertTrue(reparsedWithHandheld[0].enabled)
+        assertTrue(reparsedWithHandheld.any { it.id == "fan_mode" && !it.enabled })
+
+        // Standard (non-handheld) parsing filters out handheld IDs cleanly
+        val reparsedStandard = prefs.parseControlPanelItems(serialized, includeHandheld = false)
+        assertEquals(11, reparsedStandard.size)
+        assertTrue(reparsedStandard.none { com.example.consoleswitcher3.handheld.HandheldController.isHandheldControl(it.id) })
+    }
+
+    @Test
+    fun testHandheldControllerCyclingAndStates() {
+        val hc = com.example.consoleswitcher3.handheld.HandheldController
+        assertTrue(hc.isMoorechipBuild("Moorechip", "Retroid", "Retroid Pocket 6"))
+        assertTrue(hc.isMoorechipBuild("Moorechip", "AYN", "Odin2"))
+        assertTrue(hc.isMoorechipBuild("Retroid", "Retroid", "RP5"))
+        assertTrue(!hc.isMoorechipBuild("Google", "google", "Pixel 8"))
+
+        // Perf mode cycles 0 -> 1 -> 2 -> 0
+        assertEquals(1, hc.nextCycleValue(hc.ID_PERF_MODE, 0))
+        assertEquals(2, hc.nextCycleValue(hc.ID_PERF_MODE, 1))
+        assertEquals(0, hc.nextCycleValue(hc.ID_PERF_MODE, 2))
+
+        // Fan mode cycles 0 (Off) -> 1 (Quiet) -> 4 (Smart) -> 5 (Sport) -> 0 (Off)
+        assertEquals(1, hc.nextCycleValue(hc.ID_FAN_MODE, 0))
+        assertEquals(4, hc.nextCycleValue(hc.ID_FAN_MODE, 1))
+        assertEquals(5, hc.nextCycleValue(hc.ID_FAN_MODE, 4))
+        assertEquals(0, hc.nextCycleValue(hc.ID_FAN_MODE, 5))
+
+        // Controller style safely cycles Xbox (0) <-> Retro (1) and never lands on Disconnect (2)
+        assertEquals(1, hc.nextCycleValue(hc.ID_CONTROLLER_STYLE, 0))
+        assertEquals(0, hc.nextCycleValue(hc.ID_CONTROLLER_STYLE, 1))
+        assertEquals(0, hc.nextCycleValue(hc.ID_CONTROLLER_STYLE, 2))
+        assertEquals(3, hc.getModeOptions(hc.ID_CONTROLLER_STYLE).size)
+
+        // Trigger mode cycles 0 -> 1 -> 2 -> 0
+        assertEquals(1, hc.nextCycleValue(hc.ID_TRIGGER_MODE, 0))
+        assertEquals(2, hc.nextCycleValue(hc.ID_TRIGGER_MODE, 1))
+        assertEquals(0, hc.nextCycleValue(hc.ID_TRIGGER_MODE, 2))
+
+        // Joystick LED string parser
+        assertTrue(hc.parseJoystickLedEnabled("1,1"))
+        assertTrue(hc.parseJoystickLedEnabled("1,0"))
+        assertTrue(!hc.parseJoystickLedEnabled("0,0"))
+        assertTrue(!hc.parseJoystickLedEnabled(null))
+
+        // Card title and active highlight state resolution
+        assertEquals("Perf: Standard" to false, hc.resolveCardState(hc.ID_PERF_MODE, 0))
+        assertEquals("Perf: High" to true, hc.resolveCardState(hc.ID_PERF_MODE, 2))
+        assertEquals("Fan: Balance" to true, hc.resolveCardState(hc.ID_FAN_MODE, 2))
+        assertEquals("Style: Nintendo" to true, hc.resolveCardState(hc.ID_CONTROLLER_STYLE, 1))
+        assertEquals("Style: Disconnected" to false, hc.resolveCardState(hc.ID_CONTROLLER_STYLE, 2))
+        assertEquals("Triggers: Both" to true, hc.resolveCardState(hc.ID_TRIGGER_MODE, 2))
+        assertEquals("Joystick LED" to true, hc.resolveCardState(hc.ID_JOYSTICK_LED, 1))
+        assertEquals("Charging Separation" to false, hc.resolveCardState(hc.ID_BYPASS_CHARGING, 0))
+    }
 }
