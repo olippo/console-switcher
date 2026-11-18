@@ -2,6 +2,10 @@
 
 **App Switcher & Control Center overlay** for Android gaming handhelds, powered by **Shizuku**.
 
+![App Switcher](images/2.png)
+
+![Control Center](images/1.png)
+
 ## Requirements & Setup
 
 The app requires [Shizuku](https://shizuku.rikka.app/) to query running tasks and live app thumbnails, switch between or force-close background apps, toggle protected system settings, and control handheld hardware modes (performance, fan speed, etc.).
