@@ -2,9 +2,7 @@
 
 **App Switcher & Control Center overlay** for Android gaming handhelds, powered by **Shizuku**.
 
-![App Switcher](images/2.png)
-
-![Control Center](images/1.png)
+![App Switcher](images/1.png)
 
 ## Requirements & Setup
 

@@ -586,9 +586,15 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 // shifting surviving cards away from exact center. Compensate
                 // synchronously inside the layout pass so the target card is
                 // locked to rvTasks.width / 2f before any frame is drawn.
-                val targetIdx = pendingTargetIndexAfterRemove
+                val targetIdx = if (pendingTargetIndexAfterRemove >= 0) {
+                    pendingTargetIndexAfterRemove
+                } else if (tasks.size == 1 && animatingVictimView == null) {
+                    0
+                } else {
+                    -1
+                }
+                pendingTargetIndexAfterRemove = -1
                 if (targetIdx >= 0) {
-                    pendingTargetIndexAfterRemove = -1
                     val targetView = findViewByPosition(targetIdx)
                     if (targetView != null && targetView.width > 0) {
                         val currentCenter = (targetView.left + targetView.right) / 2f
@@ -800,7 +806,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun updateCenterPadding() {
-        val rvWidth = binding.rvTasks.width
+        val metrics = resources.displayMetrics
+        val fallbackWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
+        val rvWidth = if (binding.rvTasks.width > 0) binding.rvTasks.width else fallbackWidth
         if (rvWidth > 0) {
             val itemW = getItemWidthPx()
             val padding = ((rvWidth - itemW) / 2).coerceAtLeast(0)
@@ -3978,16 +3986,22 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             suppressIdleCommit = false
         }
         taskAdapter.selectedPosition = position
+        updateCenterPadding()
 
         val rvW = binding.rvTasks.width
         if (rvW <= 0) {
-            layoutManager.scrollToPosition(position)
+            pendingTargetIndexAfterRemove = position
+            try {
+                layoutManager.scrollToPositionWithOffset(position, 0)
+            } catch (ignored: Throwable) {
+                layoutManager.scrollToPosition(position)
+            }
             binding.rvTasks.post { updateXmbTransforms() }
             return
         }
 
         val child = layoutManager.findViewByPosition(position)
-        if (child != null && child.width > 0 && child.right > child.left) {
+        if (!binding.rvTasks.isLayoutRequested && child != null && child.width > 0 && child.right > child.left) {
             val childCenter = (child.left + child.right) / 2f
             val centerX = rvW / 2f
             val dx = Math.round(childCenter - centerX)
@@ -3996,6 +4010,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             }
             updateXmbTransforms()
         } else {
+            pendingTargetIndexAfterRemove = position
             val itemW = getItemWidthPx()
             val offset = ((rvW - itemW) / 2 - binding.rvTasks.paddingStart)
             try {

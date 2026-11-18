@@ -320,14 +320,19 @@ class DeckTaskAdapter(
                 cachedCombinedCurrentTask = null
             }
             if (currentTask?.isCurrentTask == true) {
-                if (cachedCombinedCurrentTask == null) {
-                    cachedCombinedCurrentTask = buildCombinedDrawable(
+                return if (isFocused) {
+                    cachedCombinedCurrentTask ?: buildCombinedDrawable(
                         fillColor = cardBg,
-                        strokeColor = if (isFocused) borderColor else cardBorder,
+                        strokeColor = borderColor,
                         strokeWidthDp = borderWidthDp
-                    )
+                    ).also { cachedCombinedCurrentTask = it }
+                } else {
+                    cachedCombinedNormal ?: buildCombinedDrawable(
+                        fillColor = cardBg,
+                        strokeColor = cardBorder,
+                        strokeWidthDp = borderWidthDp
+                    ).also { cachedCombinedNormal = it }
                 }
-                return cachedCombinedCurrentTask!!
             }
             return if (isFocused) {
                 cachedCombinedFocused ?: buildCombinedDrawable(
