@@ -149,14 +149,19 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private var vibrator: Vibrator? = null
     private var sideScale = com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_SIDE_SCALE
 
-    private var animatingVictimView: View? = null
+    /** Keeps closed cards on screen while they fly out (their data is already gone). */
+    private val taskRemovalAnimator = com.example.consoleswitcher3.ui.TaskRemovalItemAnimator()
     private var removalShiftX: Float = 0f
     private var removalShiftStartIndex: Int = -1
     private var removalLeftShiftX: Float = 0f
     private var removalLeftShiftEndIndex: Int = -1
     private var pendingTargetIndexAfterRemove: Int = -1
-    private var slideAnimator: ValueAnimator? = null
-    private var pendingSlideRunnable: Runnable? = null
+    /** Collapse to start in the layout pass that applies a removal (see onLayoutCompleted). */
+    private var pendingCollapse: PendingCollapse? = null
+    /** Slides the surviving cards from where they were on screen into their new slots. */
+    private var collapseAnimator: ValueAnimator? = null
+    /** The last task was closed: dismiss once its fly-out finishes. */
+    private var dismissAfterLastFlyOut = false
     private var modeTransitionAnimator: ValueAnimator? = null
     private var isEntranceAnimating: Boolean = false
     private var isWaitingForEntranceLayout: Boolean = false
@@ -257,6 +262,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         private const val PROFILE_HID_HOST = 4 // BluetoothProfile.HID_HOST / INPUT_DEVICE
         private const val ACTION_BLUETOOTH_SETTINGS = "__bluetooth_settings__"
         private const val ACTION_WIFI_SETTINGS = "__wifi_settings__"
+        private const val RECENTLY_CLOSED_TTL_MS = 4000L
+
+        /** Outlives the overlay so dismissing right after a close never cancels force-stop. */
+        private val killScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + Dispatchers.Main.immediate
+        )
+        private val recentlyClosedTasks = ConcurrentHashMap<String, Long>()
 
         private val sharedBluetoothProfiles = ConcurrentHashMap<Int, BluetoothProfile>()
         private val requestedBluetoothProfiles = ConcurrentHashMap.newKeySet<Int>()
@@ -581,6 +593,10 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
             override fun onLayoutCompleted(state: RecyclerView.State?) {
                 super.onLayoutCompleted(state)
+                if (state?.isPreLayout == true) return
+                if (binding.rvTasks.height > 0 && binding.rvTasks.minimumHeight != binding.rvTasks.height) {
+                    binding.rvTasks.minimumHeight = binding.rvTasks.height
+                }
                 // When an item is removed, RecyclerView may anchor to the first
                 // visible child and clamp excess scroll at the strip boundaries,
                 // shifting surviving cards away from exact center. Compensate
@@ -588,7 +604,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                 // locked to rvTasks.width / 2f before any frame is drawn.
                 val targetIdx = if (pendingTargetIndexAfterRemove >= 0) {
                     pendingTargetIndexAfterRemove
-                } else if (tasks.size == 1 && animatingVictimView == null) {
+                } else if (tasks.size == 1) {
                     0
                 } else {
                     -1
@@ -605,21 +621,21 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                         }
                     }
                 }
-                if (removalShiftStartIndex >= 0 || removalShiftX != 0f ||
-                    removalLeftShiftEndIndex >= 0 || removalLeftShiftX != 0f
-                ) {
-                    removalShiftStartIndex = -1
-                    removalShiftX = 0f
-                    removalLeftShiftEndIndex = -1
-                    removalLeftShiftX = 0f
+                // A removal was just applied: survivors now sit in their final
+                // slots, so start the collapse from where they were on screen.
+                pendingCollapse?.let {
+                    pendingCollapse = null
+                    startCollapse(it)
                 }
                 updateXmbTransforms()
             }
         }
         binding.rvTasks.layoutManager = layoutManager
 
-        // Disable default item animations to prevent weird fade/blinking effects on navigation
-        binding.rvTasks.itemAnimator = null
+        // No default item animations (they blink on navigation): this animator only
+        // keeps closed cards alive while they fly out, everything else is instant.
+        binding.rvTasks.itemAnimator = taskRemovalAnimator
+        binding.rvTasks.addRecyclerListener { holder -> taskRemovalAnimator.onViewRecycled(holder) }
         binding.rvTasks.overScrollMode = View.OVER_SCROLL_NEVER
 
         sideScale = com.example.consoleswitcher3.prefs.OverlayPrefs.getSideScale(this)
@@ -630,7 +646,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             cardGapPx = getCardGapPx(),
             sideScale = sideScale,
             onTaskClick = { clickedPosition, task ->
-                if (!killInFlight) {
+                if (!dismissAfterLastFlyOut) {
                     val current = pendingTarget ?: taskAdapter.selectedPosition
                     if (clickedPosition == current) {
                         finishEntranceAnimation()
@@ -709,7 +725,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
                     }
                     // One final pass so side cards rest at exactly sideScale.
                     updateXmbTransforms()
-                    killInFlight = false
                 } else {
                     // User drag/fling ended: glide the nearest card to center
                     // on the same scroller instead of snapping via a helper.
@@ -793,7 +808,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         var bestDist = Float.MAX_VALUE
         for (i in 0 until binding.rvTasks.childCount) {
             val child = binding.rvTasks.getChildAt(i) ?: continue
-            if (child === animatingVictimView) continue
+            if (taskRemovalAnimator.isFlyingOut(child)) continue
             if (child.right <= child.left) continue
             val childCenter = (child.left + child.right) / 2f
             val dist = kotlin.math.abs(centerX - childCenter)
@@ -843,18 +858,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     /** Per-card XMB transform for one attached child (see updateXmbTransforms). */
     private fun applyXmbTransform(child: View) {
-        if (child === animatingVictimView) return
+        if (taskRemovalAnimator.isFlyingOut(child)) return
         if (child.right <= child.left || child.height <= 0) return
         val centerX = binding.rvTasks.width / 2f
         if (centerX <= 0f) return
 
         val pos = layoutManager.getPosition(child)
-        val shift = when {
-            pos == RecyclerView.NO_POSITION -> 0f
-            removalShiftStartIndex >= 0 && pos >= removalShiftStartIndex -> removalShiftX
-            removalLeftShiftEndIndex >= 0 && pos <= removalLeftShiftEndIndex -> removalLeftShiftX
-            else -> 0f
-        }
+        val shift = removalShiftFor(pos)
 
         val childCenter = (child.left + child.right) / 2f
         val visualCenter = childCenter + shift
@@ -3433,7 +3443,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun switchOverlayMode(targetMode: OverlayMode, slideUp: Boolean) {
-        if (currentMode == targetMode || isTransitioningMode || killInFlight) return
+        if (currentMode == targetMode || isTransitioningMode || dismissAfterLastFlyOut) return
 
         if (targetMode == OverlayMode.CONTROL_CENTER) {
             refreshControlCards()
@@ -3455,10 +3465,17 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             binding.rvControlCenter
         }
 
+        // Settle any in-flight card removal before sliding the whole strip out.
+        queuedKillPresses = 0
+        pendingCollapse = null
+        cancelCollapse()
+        clearRemovalShifts()
+        taskRemovalAnimator.endAnimations()
+
         // Capture intended target positions before stopping active scrolls so neither
         // carousel is ever left stranded halfway between two cards.
         val targetTaskPos = if (tasks.isNotEmpty()) {
-            (pendingTarget ?: findCenterPosition() ?: taskAdapter.selectedPosition)
+            (pendingTarget ?: pendingTargetIndexAfterRemove.takeIf { it >= 0 } ?: findCenterPosition() ?: taskAdapter.selectedPosition)
                 .coerceIn(0, tasks.size - 1)
         } else 0
         val targetControlPos = if (controlCards.isNotEmpty()) {
@@ -3604,7 +3621,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     private fun setupListeners() {
         // Tap outside to dismiss
         binding.overlayRoot.setOnClickListener {
-            if (killInFlight || isTransitioningMode) return@setOnClickListener
+            if (isTransitioningMode) return@setOnClickListener
             dismissSwitcher()
         }
 
@@ -3618,7 +3635,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         binding.rvTasks.visibility = View.INVISIBLE
 
         lifecycleScope.launch {
-            var currentTasks = TaskManager.getRecentTasks(this@OverlayActivity)
+            var currentTasks = filterRecentlyClosed(TaskManager.getRecentTasks(this@OverlayActivity))
+            // Full refresh: settle any close still animating against the old list.
+            resetTaskRemovalState()
             tasks.clear()
             tasks.addAll(currentTasks)
 
@@ -3818,6 +3837,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             // Hide current children immediately so stale cards from previous scroll don't flash
             for (i in 0 until recyclerView.childCount) {
                 val child = recyclerView.getChildAt(i) ?: continue
+                if (taskRemovalAnimator.isFlyingOut(child)) continue
                 child.animate().cancel()
                 child.alpha = 0f
             }
@@ -3869,6 +3889,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         for (i in 0 until count) {
             val child = recyclerView.getChildAt(i) ?: continue
+            if (taskRemovalAnimator.isFlyingOut(child)) continue
             val pos = layoutManager.getPosition(child)
             if (pos == RecyclerView.NO_POSITION) continue
             startCardEntranceAnimator(recyclerView, child, pos, startOffsetY, duration, stepDelay, generation)
@@ -3900,6 +3921,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         entranceAnimators.clear()
         for (i in 0 until binding.rvTasks.childCount) {
             val child = binding.rvTasks.getChildAt(i) ?: continue
+            if (taskRemovalAnimator.isFlyingOut(child)) continue
             child.animate().cancel()
             child.translationY = 0f
             child.alpha = 1f
@@ -3964,7 +3986,17 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             }
         }
         scroller.targetPosition = position
-        layoutManager.startSmoothScroll(scroller)
+        if (pendingTargetIndexAfterRemove >= 0) {
+            // A removal in this frame hasn't been laid out yet: let onLayoutCompleted
+            // anchor the post-removal layout and start the collapse first, then scroll.
+            binding.rvTasks.doOnNextLayout {
+                if (pendingTarget == position && position in 0 until taskAdapter.itemCount) {
+                    layoutManager.startSmoothScroll(scroller)
+                }
+            }
+        } else {
+            layoutManager.startSmoothScroll(scroller)
+        }
     }
 
     /**
@@ -3977,6 +4009,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
      */
     private fun jumpToCenter(position: Int) {
         if (position !in tasks.indices) return
+        pendingCollapse = null
+        cancelCollapse()
+        clearRemovalShifts()
         suppressIdleCommit = true
         try {
             pendingTarget = null
@@ -4026,7 +4061,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun moveSelection(delta: Int) {
-        if (killInFlight || tasks.isEmpty()) return
+        if (dismissAfterLastFlyOut || tasks.isEmpty()) return
         // Chain off the in-flight target so rapid presses walk the strip
         // instead of re-issuing the same step from the last landed index.
         val base = pendingTarget ?: taskAdapter.selectedPosition
@@ -4050,30 +4085,52 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     private fun switchSelectedTask() {
-        if (killInFlight) return
-        val task = taskAdapter.getSelectedTask() ?: return
+        if (dismissAfterLastFlyOut) return
+        val pos = pendingTarget ?: findCenterPosition() ?: taskAdapter.selectedPosition
+        val task = taskAdapter.getTaskAt(pos) ?: taskAdapter.getSelectedTask() ?: return
         switchTask(task)
     }
 
-    /** Guards overlapping kills and actions during animated removal. */
-    private var killInFlight = false
+    /** Close presses that arrived before the previous removal was laid out. */
+    private var queuedKillPresses = 0
 
+    /** Where a removal's collapse must start from, captured before the data changed. */
+    private class PendingCollapse(
+        /** Adapter position of the removed card (= new position of its right neighbour). */
+        val removedPos: Int,
+        /** On-screen center of the left / right neighbour right before the removal. */
+        val oldLeftCenter: Float,
+        val oldRightCenter: Float,
+        val animate: Boolean,
+        val duration: Long,
+        val startDelay: Long
+    )
+
+    /**
+     * Closes the visually centered app.
+     *
+     * The task is removed from the data immediately, so the strip is never
+     * locked: navigation, switching, mode changes, Back and further closes all
+     * respond on the very next input and always act on the correct card. The
+     * visuals catch up independently:
+     *  - the closed card keeps flying out via [taskRemovalAnimator] (RecyclerView
+     *    keeps it attached until it's done, so it's never recycled mid-flight);
+     *  - the survivors start exactly where they are on screen right now (even if
+     *    a previous collapse or a scroll is still in progress) and slide into
+     *    their new slots, so rapid repeated closes chain into one smooth motion.
+     */
     private fun killSelectedTask() {
-        if (killInFlight) return
+        if (dismissAfterLastFlyOut || isFinishing || isDestroyed || tasks.isEmpty()) return
+        // A removal from a press in this same frame hasn't been laid out yet, so
+        // view positions are stale. Run this press right after that layout.
+        if (binding.rvTasks.hasPendingAdapterUpdates() || binding.rvTasks.isComputingLayout) {
+            queuedKillPresses++
+            if (queuedKillPresses == 1) {
+                binding.rvTasks.doOnNextLayout { binding.rvTasks.post { drainQueuedKills() } }
+            }
+            return
+        }
         finishEntranceAnimation()
-        // Kill what is VISUALLY centered (border + label + full size are all
-        // distance-driven, so the strip center is the selection truth).
-        val victimPos = findCenterPosition()
-            ?.takeIf { it in 0 until taskAdapter.itemCount }
-            ?: (pendingTarget ?: taskAdapter.selectedPosition)
-                .takeIf { it in 0 until taskAdapter.itemCount }
-            ?: taskAdapter.selectedPosition.coerceIn(0, (taskAdapter.itemCount - 1).coerceAtLeast(0))
-                .takeIf { taskAdapter.itemCount > 0 }
-            ?: return
-        val task = taskAdapter.getTaskAt(victimPos) ?: return
-        android.util.Log.d(TAG, "kill press: victim=$victimPos selected=${taskAdapter.selectedPosition} pending=$pendingTarget count=${taskAdapter.itemCount}")
-        killInFlight = true
-        triggerHaptic()
 
         // Stop any in-flight navigation scroll immediately
         suppressIdleCommit = true
@@ -4085,10 +4142,23 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
             suppressIdleCommit = false
         }
 
-        // Asynchronously execute kill in background without blocking the UI animation
-        lifecycleScope.launch {
+        // Kill what is VISUALLY centered (border + label + full size are all
+        // distance-driven, so the strip center is the selection truth).
+        val victimPos = findCenterPosition()
+            ?.takeIf { it in tasks.indices }
+            ?: taskAdapter.selectedPosition.takeIf { it in tasks.indices }
+            ?: return
+        val task = taskAdapter.getTaskAt(victimPos) ?: return
+        android.util.Log.d(TAG, "kill press: victim=$victimPos selected=${taskAdapter.selectedPosition} count=${taskAdapter.itemCount}")
+        triggerHaptic()
+
+        // App-wide scope: closing the overlay right after (Back, or closing the
+        // last card) must not cancel a half-finished force-stop.
+        recentlyClosedTasks[closedTaskKey(task)] = SystemClock.uptimeMillis()
+        val appContext = applicationContext
+        killScope.launch {
             try {
-                val success = TaskManager.killTask(this@OverlayActivity, task)
+                val success = TaskManager.killTask(appContext, task)
                 val msg = if (success) "Force stopped ${task.label}" else "Removed ${task.label}"
                 android.util.Log.d(TAG, msg)
             } catch (e: Throwable) {
@@ -4098,35 +4168,9 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
         val prefs = com.example.consoleswitcher3.prefs.OverlayPrefs
         val closeSpeed = prefs.getCloseAnimSpeed(this)
-        val isOff = prefs.isCloseAnimOff(closeSpeed)
         val victimView = layoutManager.findViewByPosition(victimPos)
-
-        if (isOff || victimView == null) {
-            // Instant removal without animation
-            if (victimPos in tasks.indices && victimPos < taskAdapter.itemCount) {
-                tasks.removeAt(victimPos)
-                taskAdapter.removeAt(victimPos)
-            }
-            if (tasks.isEmpty()) {
-                killInFlight = false
-                dismissSwitcher()
-                return
-            }
-
-            val nextPos = victimPos.coerceAtMost(tasks.size - 1)
-            taskAdapter.selectedPosition = nextPos
-
-            binding.rvTasks.post {
-                if (isFinishing || isDestroyed) {
-                    killInFlight = false
-                    return@post
-                }
-                jumpToCenter(nextPos)
-                updateXmbTransforms()
-                killInFlight = false
-            }
-            return
-        }
+        val animate = !prefs.isCloseAnimOff(closeSpeed) &&
+            victimView != null && victimView.width > 0 && binding.rvTasks.isShown
 
         // Dismiss (fly-up) speed follows the App closing slider.
         val closeSpeedMult = (closeSpeed / com.example.consoleswitcher3.prefs.OverlayPrefs.DEFAULT_CLOSE_SPEED).coerceIn(0.5f, 3.0f)
@@ -4138,267 +4182,222 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         val slideDuration = (210L / navSpeedMult).toLong().coerceIn(60L, 500L)
         val slideDelayMs = com.example.consoleswitcher3.prefs.OverlayPrefs.getSlideDelayMs(this).toLong()
 
-        animatingVictimView = victimView
-        victimView.translationZ = 40f
-
-        val flyDistance = (binding.rvTasks.height.takeIf { it > 0 }
-            ?: resources.displayMetrics.heightPixels).toFloat() * 1.5f
-
-        val hasRightNeighbor = victimPos < tasks.size - 1
-        val slotWidth = victimView.width.toFloat().takeIf { it > 0f }
-            ?: getItemWidthPx().toFloat()
-
-        var flyDone = false
-        var slideDone = false
-        var finalized = false
-        var watchdogRunnable: Runnable? = null
-
-        fun checkAndFinalize() {
-            if (finalized) return
-            if (!flyDone || !slideDone) return
-            finalized = true
-            watchdogRunnable?.let { binding.rvTasks.removeCallbacks(it) }
-
-            if (isFinishing || isDestroyed) {
-                killInFlight = false
-                slideAnimator = null
-                animatingVictimView = null
-                return
-            }
-
-            if (tasks.size <= 1) {
-                animatingVictimView = null
-                victimView.translationY = 0f
-                victimView.alpha = 1f
-                victimView.scaleX = 1f
-                victimView.scaleY = 1f
-                victimView.translationZ = 0f
-                tasks.clear()
-                taskAdapter.updateTasks(emptyList())
-                killInFlight = false
-                dismissSwitcher()
-                return
-            }
-
-            val nextPos = if (hasRightNeighbor) {
-                victimPos.coerceAtMost(tasks.size - 2)
-            } else {
-                victimPos - 1
-            }
-
-            // Lock the surviving target card to exact center inside the layout
-            // pass triggered by notifyItemRemoved.
-            pendingTargetIndexAfterRemove = nextPos
-
-            // Reset victim view and animation shifts before adapter removal so if
-            // RecyclerView recycles or detaches it during layout, its view state is clean.
-            removalShiftStartIndex = -1
-            removalShiftX = 0f
-            removalLeftShiftEndIndex = -1
-            removalLeftShiftX = 0f
-            animatingVictimView = null
-            victimView.translationY = 0f
-            victimView.alpha = 1f
-            victimView.scaleX = 1f
-            victimView.scaleY = 1f
-            victimView.translationZ = 0f
-
-            if (victimPos in tasks.indices && victimPos < taskAdapter.itemCount) {
-                tasks.removeAt(victimPos)
-                taskAdapter.removeAt(victimPos)
-                taskAdapter.selectedPosition = nextPos
-            }
-
-            var cleanedUp = false
-            fun finishKill() {
-                if (cleanedUp) return
-                cleanedUp = true
-                if (!isFinishing && !isDestroyed) {
-                    updateXmbTransforms()
-                    triggerHaptic()
-                }
-                killInFlight = false
-            }
-            binding.rvTasks.doOnNextLayout { finishKill() }
-            binding.rvTasks.post { finishKill() }
-        }
-
-        // Safety watchdog: ensure kill state is never locked permanently if animation callbacks drop
-        val watchdogTimeoutMs = (flyDuration + slideDuration + slideDelayMs + 300L).coerceAtLeast(600L)
-        val watchdog = Runnable {
-            if (!finalized && !isFinishing && !isDestroyed) {
-                android.util.Log.w(TAG, "kill watchdog triggered: forcing checkAndFinalize")
-                flyDone = true
-                slideDone = true
-                checkAndFinalize()
-            }
-        }
-        watchdogRunnable = watchdog
-        binding.rvTasks.postDelayed(watchdog, watchdogTimeoutMs)
-
-        // Start the slide animation (in parallel with the fly-up or delayed by slideDelayMs).
+        // Snapshot where the neighbours are on screen BEFORE the data changes,
+        // including any collapse offset still in flight from a previous close.
         val centerX = binding.rvTasks.width / 2f
-        if (hasRightNeighbor) {
-            // Slide right neighbors to exact center (not just -slotWidth, which would
-            // land off-center if kill was pressed while the strip was mid-scroll),
-            // and simultaneously settle left neighbors if the strip was slightly off-center.
-            val rightView = layoutManager.findViewByPosition(victimPos + 1)
-            val rightCenter = if (rightView != null && rightView.width > 0 && rightView.right > rightView.left) {
-                (rightView.left + rightView.right) / 2f
-            } else {
-                centerX + slotWidth
-            }
-            val targetRightShift = centerX - rightCenter
+        val slotWidth = victimView?.width?.toFloat()?.takeIf { it > 0f } ?: getItemWidthPx().toFloat()
+        val victimCenter = victimView?.let { visualCenterOf(it, victimPos) } ?: centerX
+        val oldLeftCenter = (if (victimPos > 0) layoutManager.findViewByPosition(victimPos - 1) else null)
+            ?.takeIf { it.right > it.left }
+            ?.let { visualCenterOf(it, victimPos - 1) }
+            ?: (victimCenter - slotWidth)
+        val oldRightCenter = layoutManager.findViewByPosition(victimPos + 1)
+            ?.takeIf { it.right > it.left }
+            ?.let { visualCenterOf(it, victimPos + 1) }
+            ?: (victimCenter + slotWidth)
 
-            val leftView = if (victimPos > 0) layoutManager.findViewByPosition(victimPos - 1) else null
-            val targetLeftShift = if (leftView != null && leftView.width > 0 && leftView.right > leftView.left) {
-                val leftCenter = (leftView.left + leftView.right) / 2f
-                (centerX - slotWidth) - leftCenter
-            } else {
-                0f
-            }
-
-            removalShiftStartIndex = victimPos + 1
-            removalShiftX = 0f
-            removalLeftShiftEndIndex = victimPos - 1
-            removalLeftShiftX = 0f
-
-            pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
-            slideAnimator?.cancel()
-            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = slideDuration
-                interpolator = DecelerateInterpolator(1.5f)
-                addUpdateListener { anim ->
-                    if (isFinishing || isDestroyed) return@addUpdateListener
-                    val f = anim.animatedValue as Float
-                    removalShiftX = targetRightShift * f
-                    removalLeftShiftX = targetLeftShift * f
-                    updateXmbTransforms()
-                }
-                addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: Animator) {
-                        slideAnimator = null
-                        slideDone = true
-                        checkAndFinalize()
-                    }
-
-                    override fun onAnimationCancel(animation: Animator) {
-                        slideAnimator = null
-                        removalShiftStartIndex = -1
-                        removalShiftX = 0f
-                        removalLeftShiftEndIndex = -1
-                        removalLeftShiftX = 0f
-                        animatingVictimView = null
-                        victimView.translationY = 0f
-                        victimView.alpha = 1f
-                        victimView.scaleX = 1f
-                        victimView.scaleY = 1f
-                        victimView.translationZ = 0f
-                        killInFlight = false
-                    }
-                })
-            }
-            slideAnimator = animator
-
-            val runnable = Runnable {
-                pendingSlideRunnable = null
-                if (!isFinishing && !isDestroyed) {
-                    animator.start()
-                }
-            }
-            pendingSlideRunnable = runnable
-
-            if (slideDelayMs > 0L) {
-                binding.rvTasks.postDelayed(runnable, slideDelayMs)
-            } else {
-                runnable.run()
-            }
-        } else if (tasks.size > 1) {
-            // Victim was the last card: slide left neighbors right so nextPos lands at exact center.
-            val nextPos = victimPos - 1
-            val nextView = layoutManager.findViewByPosition(nextPos)
-            val nextCenter = if (nextView != null && nextView.width > 0 && nextView.right > nextView.left) {
-                (nextView.left + nextView.right) / 2f
-            } else {
-                centerX - slotWidth
-            }
-            val targetLeftShift = centerX - nextCenter
-
-            removalLeftShiftEndIndex = nextPos
-            removalLeftShiftX = 0f
-
-            pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
-            slideAnimator?.cancel()
-            val animator = ValueAnimator.ofFloat(0f, targetLeftShift).apply {
-                duration = slideDuration
-                interpolator = DecelerateInterpolator(1.5f)
-                addUpdateListener { anim ->
-                    if (isFinishing || isDestroyed) return@addUpdateListener
-                    removalLeftShiftX = anim.animatedValue as Float
-                    updateXmbTransforms()
-                }
-                addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: Animator) {
-                        slideAnimator = null
-                        slideDone = true
-                        checkAndFinalize()
-                    }
-
-                    override fun onAnimationCancel(animation: Animator) {
-                        slideAnimator = null
-                        removalLeftShiftEndIndex = -1
-                        removalLeftShiftX = 0f
-                        animatingVictimView = null
-                        victimView.translationY = 0f
-                        victimView.alpha = 1f
-                        victimView.scaleX = 1f
-                        victimView.scaleY = 1f
-                        victimView.translationZ = 0f
-                        killInFlight = false
-                    }
-                })
-            }
-            slideAnimator = animator
-
-            val runnable = Runnable {
-                pendingSlideRunnable = null
-                if (!isFinishing && !isDestroyed) {
-                    animator.start()
-                }
-            }
-            pendingSlideRunnable = runnable
-
-            if (slideDelayMs > 0L) {
-                binding.rvTasks.postDelayed(runnable, slideDelayMs)
-            } else {
-                runnable.run()
-            }
-        } else {
-            // Single card (tasks.size <= 1), no slide needed
-            slideDone = true
+        // Hand the card to the item animator BEFORE its data goes away.
+        if (animate) {
+            val flyDistance = (binding.rvTasks.height.takeIf { it > 0 }
+                ?: resources.displayMetrics.heightPixels).toFloat() * 1.5f
+            startFlyOut(binding.rvTasks.getChildViewHolder(victimView), flyDuration, flyDistance)
         }
 
-        victimView.animate()
-            .translationY(-flyDistance)
-            .alpha(0f)
-            .scaleX(0.82f)
-            .scaleY(0.82f)
-            .setDuration(flyDuration)
-            .setInterpolator(AccelerateInterpolator(1.6f))
-            .withEndAction {
-                flyDone = true
-                checkAndFinalize()
+        if (binding.rvTasks.height > 0 && binding.rvTasks.minimumHeight != binding.rvTasks.height) {
+            binding.rvTasks.minimumHeight = binding.rvTasks.height
+        }
+
+        // Commit the removal right away.
+        tasks.removeAt(victimPos)
+
+        if (tasks.isEmpty()) {
+            pendingCollapse = null
+            cancelCollapse()
+            clearRemovalShifts()
+            if (animate) {
+                // Keep the adapter intact during the final fly-out so RecyclerView
+                // doesn't run an empty-list layout pass or detach the card mid-flight;
+                // the overlay finishes as soon as the fly-out ends (see startFlyOut).
+                dismissAfterLastFlyOut = true
+            } else {
+                taskAdapter.removeAt(victimPos)
+                dismissSwitcher()
             }
-            .start()
+            return
+        }
+
+        taskAdapter.removeAt(victimPos)
+
+        // The right neighbour takes the victim's index; if there was none,
+        // the left neighbour becomes the centered card.
+        val nextPos = victimPos.coerceAtMost(tasks.size - 1)
+        taskAdapter.selectedPosition = nextPos
+        // Anchor post-layout directly on nextPos at paddingStart (centerX). Without
+        // this, when the centered card is removed, LinearLayoutManager.findReferenceChild
+        // sees every other card outside [paddingStart, width - paddingEnd], picks the
+        // leftmost attached card (e.g. victimPos - 4) and snaps it to centerX, which
+        // when closing the last card on the right leaves nextPos off-screen.
+        layoutManager.scrollToPositionWithOffset(nextPos, 0)
+        // Lock the surviving target card to exact center inside the layout
+        // pass triggered by notifyItemRemoved, then start the collapse there.
+        pendingTargetIndexAfterRemove = nextPos
+        pendingCollapse = PendingCollapse(
+            removedPos = victimPos,
+            oldLeftCenter = oldLeftCenter,
+            oldRightCenter = oldRightCenter,
+            animate = animate,
+            duration = slideDuration,
+            startDelay = slideDelayMs
+        )
+    }
+
+    private fun drainQueuedKills() {
+        val presses = queuedKillPresses
+        queuedKillPresses = 0
+        // Each close re-queues itself behind the layout of the previous one.
+        repeat(presses) { killSelectedTask() }
+    }
+
+    /** Fly-up of a closed card: up, shrink and fade, from wherever it currently is. */
+    private fun startFlyOut(holder: RecyclerView.ViewHolder, duration: Long, distance: Float) {
+        val view = holder.itemView
+        view.animate().cancel()
+        view.translationZ = 40f
+        val startY = view.translationY
+        val startAlpha = view.alpha
+        val startScale = view.scaleX
+        val endY = -distance
+        val endScale = startScale * 0.82f
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            this.duration = duration
+            interpolator = AccelerateInterpolator(1.6f)
+            addUpdateListener { anim ->
+                val f = anim.animatedValue as Float
+                view.translationY = startY + (endY - startY) * f
+                view.alpha = startAlpha * (1f - f)
+                val scale = startScale + (endScale - startScale) * f
+                view.scaleX = scale
+                view.scaleY = scale
+            }
+        }
+        taskRemovalAnimator.startFlyOut(holder, animator) {
+            if (dismissAfterLastFlyOut && tasks.isEmpty() && !taskRemovalAnimator.hasActiveFlyOuts() && !isFinishing && !isDestroyed) {
+                dismissSwitcher()
+            }
+        }
+    }
+
+    /**
+     * Runs inside the layout pass that applied a removal: the survivors already
+     * sit in their final slots, so offset them back to where they were on screen
+     * and animate that offset away (FLIP). Interrupting a running collapse is
+     * seamless because the snapshot included its current offset.
+     */
+    private fun startCollapse(collapse: PendingCollapse) {
+        cancelCollapse()
+        clearRemovalShifts()
+        if (!collapse.animate) return
+
+        fun layoutCenterAt(pos: Int): Float? {
+            if (pos < 0) return null
+            val v = layoutManager.findViewByPosition(pos) ?: return null
+            if (v.right <= v.left) return null
+            return (v.left + v.right) / 2f
+        }
+        val rightShift = layoutCenterAt(collapse.removedPos)
+            ?.let { collapse.oldRightCenter - it } ?: 0f
+        val leftShift = layoutCenterAt(collapse.removedPos - 1)
+            ?.let { collapse.oldLeftCenter - it } ?: 0f
+        if (kotlin.math.abs(rightShift) < 0.5f && kotlin.math.abs(leftShift) < 0.5f) return
+
+        removalShiftStartIndex = if (rightShift != 0f) collapse.removedPos else -1
+        removalShiftX = rightShift
+        removalLeftShiftEndIndex = if (leftShift != 0f) collapse.removedPos - 1 else -1
+        removalLeftShiftX = leftShift
+
+        val animator = ValueAnimator.ofFloat(1f, 0f).apply {
+            duration = collapse.duration
+            startDelay = collapse.startDelay
+            interpolator = DecelerateInterpolator(1.5f)
+            addUpdateListener { anim ->
+                if (collapseAnimator !== anim) return@addUpdateListener
+                val f = anim.animatedValue as Float
+                removalShiftX = rightShift * f
+                removalLeftShiftX = leftShift * f
+                updateXmbTransforms()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    // Superseded by a newer close (or cancelled): it owns the shifts now.
+                    if (collapseAnimator !== animation) return
+                    collapseAnimator = null
+                    clearRemovalShifts()
+                    if (!isFinishing && !isDestroyed) {
+                        updateXmbTransforms()
+                        triggerHaptic()
+                    }
+                }
+            })
+        }
+        collapseAnimator = animator
+        animator.start()
+    }
+
+    private fun cancelCollapse() {
+        val animator = collapseAnimator ?: return
+        collapseAnimator = null
+        animator.cancel()
+    }
+
+    private fun clearRemovalShifts() {
+        removalShiftStartIndex = -1
+        removalShiftX = 0f
+        removalLeftShiftEndIndex = -1
+        removalLeftShiftX = 0f
+    }
+
+    /** Collapse offset currently applied to the card at adapter position [pos]. */
+    private fun removalShiftFor(pos: Int): Float = when {
+        pos == RecyclerView.NO_POSITION -> 0f
+        removalShiftStartIndex >= 0 && pos >= removalShiftStartIndex -> removalShiftX
+        removalLeftShiftEndIndex >= 0 && pos <= removalLeftShiftEndIndex -> removalLeftShiftX
+        else -> 0f
+    }
+
+    /** Untransformed on-screen center of [view] (layout center + collapse offset). */
+    private fun visualCenterOf(view: View, pos: Int): Float =
+        (view.left + view.right) / 2f + removalShiftFor(pos)
+
+    /** Settles every in-flight close instantly (full data refresh / teardown). */
+    private fun resetTaskRemovalState() {
+        queuedKillPresses = 0
+        dismissAfterLastFlyOut = false
+        pendingCollapse = null
+        cancelCollapse()
+        clearRemovalShifts()
+        taskRemovalAnimator.endAnimations()
+    }
+
+    private fun closedTaskKey(task: DeckTask): String =
+        if (task.taskId > 0) "id:${task.taskId}" else "pkg:${task.packageName}"
+
+    /** Drops tasks closed moments ago that the system may still report while being killed. */
+    private fun filterRecentlyClosed(list: List<DeckTask>): List<DeckTask> {
+        val now = SystemClock.uptimeMillis()
+        recentlyClosedTasks.values.removeAll { now - it > RECENTLY_CLOSED_TTL_MS }
+        if (recentlyClosedTasks.isEmpty()) return list
+        return list.filter { !recentlyClosedTasks.containsKey(closedTaskKey(it)) }
     }
 
     private fun dismissSwitcher() {
-        killInFlight = false
-        finishEntranceAnimation()
-        pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
-        pendingSlideRunnable = null
-        slideAnimator?.cancel()
-        animatingVictimView?.animate()?.cancel()
+        if (isFinishing) return
+        dismissAfterLastFlyOut = false
+        queuedKillPresses = 0
+        pendingCollapse = null
+        cancelCollapse()
+        if (tasks.isEmpty()) {
+            binding.rvTasks.visibility = View.INVISIBLE
+        }
         finish()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, 0, 0)
@@ -4460,6 +4459,8 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onStop() {
         super.onStop()
+        resetTaskRemovalState()
+        finishEntranceAnimation()
         try {
             unregisterReceiver(volumeReceiver)
         } catch (ignored: Throwable) {}
@@ -4470,7 +4471,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onResume() {
         super.onResume()
-        killInFlight = false
+        dismissAfterLastFlyOut = false
         isTransitioningMode = false
         initBrightness()
         lastReportedVolume = getVolumePercent()
@@ -4499,15 +4500,13 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
 
     override fun onPause() {
         super.onPause()
-        killInFlight = false
-        finishEntranceAnimation()
         isTransitioningMode = false
         gamepadHelper.reset()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        killInFlight = false
+        resetTaskRemovalState()
         finishEntranceAnimation()
         isTransitioningMode = false
         closeBluetoothProfiles()
@@ -4518,10 +4517,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
         binding.layoutMedia.animate().cancel()
         modeTransitionAnimator?.cancel()
         modeTransitionAnimator = null
-        pendingSlideRunnable?.let { binding.rvTasks.removeCallbacks(it) }
-        pendingSlideRunnable = null
-        slideAnimator?.cancel()
-        animatingVictimView?.animate()?.cancel()
     }
 
     private fun initBrightness() {
@@ -4778,7 +4773,6 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN &&
             (event.keyCode == KeyEvent.KEYCODE_BUTTON_SELECT || event.keyCode == KeyEvent.KEYCODE_MENU)) {
-            if (killInFlight) return true
             openSettings()
             return true
         }
@@ -4833,7 +4827,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavUp() {
-        if (isTransitioningMode || killInFlight) return
+        if (isTransitioningMode || dismissAfterLastFlyOut) return
         finishEntranceAnimation()
         if (isControlModalOpen) {
             moveBluetoothSelection(-1)
@@ -4848,7 +4842,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavDown() {
-        if (isTransitioningMode || killInFlight) return
+        if (isTransitioningMode || dismissAfterLastFlyOut) return
         finishEntranceAnimation()
         if (isControlModalOpen) {
             moveBluetoothSelection(1)
@@ -4863,7 +4857,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavStart() {
-        if (killInFlight) return
+        if (dismissAfterLastFlyOut) return
         if (isControlModalOpen) {
             if (bluetoothDeviceAdapter.itemCount > 0 && bluetoothDeviceAdapter.selectedPosition != 0) {
                 triggerHaptic()
@@ -4888,7 +4882,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onNavEnd() {
-        if (killInFlight) return
+        if (dismissAfterLastFlyOut) return
         if (isControlModalOpen) {
             val end = bluetoothDeviceAdapter.itemCount - 1
             if (end >= 0 && bluetoothDeviceAdapter.selectedPosition != end) {
@@ -4954,7 +4948,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onButtonBack() {
-        if (killInFlight || isTransitioningMode) return
+        if (isTransitioningMode) return
         finishEntranceAnimation()
         if (isControlModalOpen) {
             closeControlModal()
@@ -4986,7 +4980,7 @@ class OverlayActivity : AppCompatActivity(), GamepadInputHelper.GamepadListener 
     }
 
     override fun onButtonY() {
-        if (killInFlight || isTransitioningMode) return
+        if (isTransitioningMode) return
         finishEntranceAnimation()
         toggleBackgroundMedia()
     }
